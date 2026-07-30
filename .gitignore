@@ -1,0 +1,12 @@
+node_modules/
+dist/
+work/
+outputs/
+.DS_Store
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.coverage
+.pytest_cache/

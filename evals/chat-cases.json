@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "chat-local-transport-001",
+      "input": "Explain the local vertical slice.",
+      "mode": "chat",
+      "required_phrases": [
+        "Python API",
+        "without calling an external model"
+      ],
+      "forbidden_phrases": [
+        "I searched the web",
+        "Gemini says"
+      ]
+    },
+    {
+      "id": "research-local-plan-001",
+      "input": "Evaluate the personal AI agent market.",
+      "mode": "research",
+      "required_phrases": [
+        "local research simulation mode",
+        "independent sources",
+        "open questions"
+      ],
+      "forbidden_phrases": [
+        "I completed live research"
+      ]
+    }
+  ]
+}

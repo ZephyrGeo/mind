@@ -1,0 +1,22 @@
+{
+  "name": "mind-personal-agent",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "node scripts/start-local.mjs",
+    "dev:web": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "preview": "node scripts/dev.mjs --no-watch",
+    "test": "npm run build && node --test tests/frontend-contract.test.mjs",
+    "test:all": "npm test && python3 -m unittest discover -s backend/tests -v"
+  },
+  "dependencies": {
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {},
+  "type": "module"
+}

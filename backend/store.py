@@ -1,0 +1,100 @@
+"""Small JSON conversation store for the zero-cost local development phase."""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+class ConversationStore:
+    def __init__(self, file_path: str | Path) -> None:
+        self.file_path = Path(file_path)
+        self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+
+    def _read(self) -> dict[str, list[dict[str, Any]]]:
+        if not self.file_path.exists():
+            return {"conversations": []}
+        with self.file_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def _write(self, payload: dict[str, list[dict[str, Any]]]) -> None:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=self.file_path.parent,
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            temporary_path = Path(handle.name)
+        os.replace(temporary_path, self.file_path)
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        with self._lock:
+            conversations = self._read()["conversations"]
+            ordered = sorted(
+                conversations,
+                key=lambda conversation: conversation["updated_at"],
+                reverse=True,
+            )
+            return [
+                {
+                    "id": conversation["id"],
+                    "title": conversation["title"],
+                    "updated_at": conversation["updated_at"],
+                    "message_count": len(conversation["messages"]),
+                }
+                for conversation in ordered
+            ]
+
+    def append_exchange(
+        self,
+        conversation_id: str | None,
+        user_message: str,
+        assistant_message: str,
+        mode: str,
+    ) -> str:
+        with self._lock:
+            payload = self._read()
+            conversations = payload["conversations"]
+            conversation = next(
+                (
+                    item
+                    for item in conversations
+                    if conversation_id and item["id"] == conversation_id
+                ),
+                None,
+            )
+            now = datetime.now(timezone.utc).isoformat()
+            if conversation is None:
+                conversation_id = str(uuid.uuid4())
+                title = user_message.strip().replace("\n", " ")[:56] or "New conversation"
+                conversation = {
+                    "id": conversation_id,
+                    "title": title,
+                    "created_at": now,
+                    "updated_at": now,
+                    "mode": mode,
+                    "messages": [],
+                }
+                conversations.append(conversation)
+
+            conversation["messages"].extend(
+                [
+                    {"role": "user", "content": user_message, "created_at": now},
+                    {
+                        "role": "assistant",
+                        "content": assistant_message,
+                        "created_at": now,
+                    },
+                ]
+            )
+            conversation["updated_at"] = now
+            self._write(payload)
+            return str(conversation_id)
