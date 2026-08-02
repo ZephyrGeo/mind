@@ -307,7 +307,7 @@ function Composer({
     h(
       "div",
       { className: "composer-footnote" },
-      h("span", null, "Fake Agent · no model calls · no cloud cost"),
+      h("span", null, "Fake Provider · no model calls · no cloud cost"),
       h("span", null, "Enter to send · Shift+Enter for a new line"),
     ),
   );

@@ -1,203 +1,450 @@
-"""Dependency-free local HTTP API for Mind's first vertical slice."""
-
-from __future__ import annotations
+"""FastAPI application for Mind's replaceable Agent Kernel foundation."""
 
 import argparse
+import hashlib
+import hmac
 import json
-import os
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+import logging
+import re
+import time
+import uuid
+from collections.abc import Iterator
+from typing import Annotated, Any
 
-from .fake_agent import FakeAgent
-from .store import ConversationStore
+from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-LOCAL_TOKEN = os.environ.get("MIND_LOCAL_TOKEN", "local-demo-token")
-DEFAULT_DATA_PATH = Path(
-    os.environ.get(
-        "MIND_DATA_PATH",
-        Path(__file__).resolve().parents[1] / "work" / "local-data" / "conversations.json",
-    )
+from .config import DEFAULT_LOCAL_TOKEN, Settings
+from .errors import APIError
+from .fake_agent import FakeAgentProvider
+from .model_provider import ModelProvider
+from .models import (
+    ChatRequest,
+    ConversationsResponse,
+    ErrorBody,
+    ErrorDetail,
+    ErrorResponse,
+    HealthResponse,
+    LocalPrincipal,
+)
+from .observability import configure_logging, log_event
+from .repositories import ConversationRepository
+from .store import (
+    LOCAL_USER_ID,
+    ConversationNotFoundError,
+    JsonConversationRepository,
 )
 
 
-def is_authorized_header(value: str | None) -> bool:
-    return value == f"Bearer {LOCAL_TOKEN}"
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+LOCAL_TOKEN = DEFAULT_LOCAL_TOKEN
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def is_authorized_header(
+    value: str | None,
+    expected_token: str = LOCAL_TOKEN,
+) -> bool:
+    if value is None or not value.startswith("Bearer "):
+        return False
+    supplied_token = value.removeprefix("Bearer ")
+    return hmac.compare_digest(supplied_token, expected_token)
 
 
 def validate_chat_payload(payload: dict[str, Any]) -> tuple[str, str, str | None]:
-    message = str(payload.get("message", "")).strip()
-    if not message:
-        raise ValueError("Message cannot be empty.")
-    mode = "research" if payload.get("mode") == "research" else "chat"
-    conversation_id = payload.get("conversation_id")
-    return message, mode, str(conversation_id) if conversation_id else None
+    """Compatibility helper retained for callers of the milestone-one module."""
+
+    request = ChatRequest.model_validate(payload)
+    conversation_id = (
+        str(request.conversation_id) if request.conversation_id else None
+    )
+    return request.message, request.mode.value, conversation_id
 
 
-class MindServer(ThreadingHTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-
-    def __init__(
-        self,
-        server_address: tuple[str, int],
-        store: ConversationStore,
-        agent: FakeAgent,
-    ) -> None:
-        super().__init__(server_address, MindRequestHandler)
-        self.store = store
-        self.agent = agent
+def _request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", str(uuid.uuid4()))
 
 
-class MindRequestHandler(BaseHTTPRequestHandler):
-    server: MindServer
-
-    def log_message(self, format_string: str, *args: Any) -> None:
-        if os.environ.get("MIND_QUIET") != "1":
-            super().log_message(format_string, *args)
-
-    def _cors_headers(self) -> None:
-        origin = self.headers.get("Origin", "")
-        allowed_origin = origin if origin in {"http://127.0.0.1:3000", "http://localhost:3000"} else "http://127.0.0.1:3000"
-        self.send_header("Access-Control-Allow-Origin", allowed_origin)
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Vary", "Origin")
-
-    def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self._cors_headers()
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _is_authenticated(self) -> bool:
-        return is_authorized_header(self.headers.get("Authorization"))
-
-    def _require_authentication(self) -> bool:
-        if self._is_authenticated():
-            return True
-        self._send_json(
-            HTTPStatus.UNAUTHORIZED,
-            {"error": "authentication_required", "message": "A valid local token is required."},
+def _error_response(
+    request: Request,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    details: list[ErrorDetail] | None = None,
+) -> JSONResponse:
+    payload = ErrorResponse(
+        error=ErrorBody(
+            code=code,
+            message=message,
+            request_id=_request_id(request),
+            details=details or [],
         )
-        return False
-
-    def _read_json(self) -> dict[str, Any]:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        if content_length <= 0 or content_length > 64_000:
-            raise ValueError("Request body must be between 1 and 64000 bytes.")
-        return json.loads(self.rfile.read(content_length))
-
-    def do_OPTIONS(self) -> None:  # noqa: N802
-        self.send_response(HTTPStatus.NO_CONTENT)
-        self._cors_headers()
-        self.end_headers()
-
-    def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
-        if path == "/api/health":
-            self._send_json(
-                HTTPStatus.OK,
-                {
-                    "status": "ok",
-                    "service": "mind-local-api",
-                    "provider": "fake",
-                    "billable_model_calls": False,
-                },
-            )
-            return
-
-        if path == "/api/conversations":
-            if not self._require_authentication():
-                return
-            self._send_json(
-                HTTPStatus.OK,
-                {"conversations": self.server.store.list_conversations()},
-            )
-            return
-
-        self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
-
-    def do_POST(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
-        if path != "/api/chat":
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
-            return
-        if not self._require_authentication():
-            return
-
-        try:
-            payload = self._read_json()
-            message, mode, conversation_id = validate_chat_payload(payload)
-        except (ValueError, json.JSONDecodeError) as error:
-            self._send_json(
-                HTTPStatus.BAD_REQUEST,
-                {"error": "invalid_request", "message": str(error)},
-            )
-            return
-
-        self.send_response(HTTPStatus.OK)
-        self._cors_headers()
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
-
-        try:
-            reply_parts: list[str] = []
-            for delta in self.server.agent.stream_reply(message, mode):
-                reply_parts.append(delta)
-                event = json.dumps({"type": "delta", "delta": delta}, ensure_ascii=False)
-                self.wfile.write(f"data: {event}\n\n".encode("utf-8"))
-                self.wfile.flush()
-
-            stored_id = self.server.store.append_exchange(
-                conversation_id,
-                message,
-                "".join(reply_parts),
-                mode,
-            )
-            done_event = json.dumps(
-                {"type": "done", "conversation_id": stored_id},
-                ensure_ascii=False,
-            )
-            self.wfile.write(f"data: {done_event}\n\n".encode("utf-8"))
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            return
-
-
-def create_server(
-    port: int = 8000,
-    data_path: str | Path = DEFAULT_DATA_PATH,
-    delay_seconds: float = 0.018,
-) -> MindServer:
-    return MindServer(
-        ("127.0.0.1", port),
-        ConversationStore(data_path),
-        FakeAgent(delay_seconds=delay_seconds),
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content=payload.model_dump(mode="json"),
+        headers={"X-Request-ID": payload.error.request_id},
     )
 
 
+def _validation_details(error: RequestValidationError) -> list[ErrorDetail]:
+    return [
+        ErrorDetail(
+            location=list(item.get("loc", [])),
+            message=item.get("msg", "Invalid value."),
+            type=item.get("type", "validation_error"),
+        )
+        for item in error.errors()
+    ]
+
+
+def _sse_event(payload: dict[str, Any]) -> str:
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"data: {serialized}\n\n"
+
+
+def create_app(
+    *,
+    settings: Settings | None = None,
+    repository: ConversationRepository | None = None,
+    provider: ModelProvider | None = None,
+) -> FastAPI:
+    runtime_settings = settings or Settings.from_env()
+    runtime_repository = repository or JsonConversationRepository(
+        runtime_settings.data_path
+    )
+    runtime_provider = provider or FakeAgentProvider()
+    logger = configure_logging(
+        runtime_settings.log_level,
+        runtime_settings.quiet,
+    )
+
+    application = FastAPI(
+        title="Mind Personal Agent API",
+        summary="Streaming API and replaceable Agent Kernel boundaries.",
+        description=(
+            "Milestone 2 exposes a zero-cost Fake ModelProvider through the same "
+            "typed interfaces that will later host Gemini, Firestore, tools, and "
+            "checkpointed Deep Research."
+        ),
+        version="0.2.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
+        contact={
+            "name": "Mind Personal Agent",
+            "url": "https://github.com/ZephyrGeo/mind",
+        },
+        license_info={"name": "Private project"},
+    )
+    application.state.settings = runtime_settings
+    application.state.repository = runtime_repository
+    application.state.provider = runtime_provider
+    application.state.logger = logger
+
+    @application.middleware("http")
+    async def request_size_limit(request: Request, call_next: Any) -> Any:
+        content_length = request.headers.get("Content-Length")
+        if content_length:
+            try:
+                too_large = int(content_length) > runtime_settings.max_request_bytes
+            except ValueError:
+                too_large = True
+            if too_large:
+                response = _error_response(
+                    request,
+                    status_code=413,
+                    code="request_too_large",
+                    message=(
+                        "Request body exceeds the configured "
+                        f"{runtime_settings.max_request_bytes}-byte limit."
+                    ),
+                )
+                return response
+        return await call_next(request)
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(runtime_settings.allowed_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=[
+            "Accept",
+            "Authorization",
+            "Content-Type",
+            "X-Request-ID",
+        ],
+        expose_headers=["X-Request-ID"],
+    )
+
+    @application.middleware("http")
+    async def request_context(request: Request, call_next: Any) -> Any:
+        started = time.perf_counter()
+        supplied_request_id = request.headers.get("X-Request-ID", "")
+        request.state.request_id = (
+            supplied_request_id
+            if REQUEST_ID_PATTERN.fullmatch(supplied_request_id)
+            else str(uuid.uuid4())
+        )
+
+        response = await call_next(request)
+
+        response.headers["X-Request-ID"] = request.state.request_id
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        log_event(
+            logger,
+            "request_completed",
+            request_id=request.state.request_id,
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            latency_ms=latency_ms,
+            result_status="success" if response.status_code < 400 else "error",
+        )
+        return response
+
+    @application.exception_handler(APIError)
+    async def api_error_handler(request: Request, error: APIError) -> JSONResponse:
+        return _error_response(
+            request,
+            status_code=error.status_code,
+            code=error.code,
+            message=error.message,
+            details=error.details,
+        )
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        request: Request,
+        error: RequestValidationError,
+    ) -> JSONResponse:
+        return _error_response(
+            request,
+            status_code=422,
+            code="validation_error",
+            message="The request did not match the API schema.",
+            details=_validation_details(error),
+        )
+
+    @application.exception_handler(StarletteHTTPException)
+    async def http_error_handler(
+        request: Request,
+        error: StarletteHTTPException,
+    ) -> JSONResponse:
+        code = "not_found" if error.status_code == 404 else "http_error"
+        message = (
+            "The requested resource was not found."
+            if error.status_code == 404
+            else str(error.detail)
+        )
+        return _error_response(
+            request,
+            status_code=error.status_code,
+            code=code,
+            message=message,
+        )
+
+    @application.exception_handler(Exception)
+    async def unexpected_error_handler(
+        request: Request,
+        error: Exception,
+    ) -> JSONResponse:
+        logger.exception(
+            "unhandled_exception",
+            extra={
+                "event_data": {
+                    "request_id": _request_id(request),
+                    "method": request.method,
+                    "path": request.url.path,
+                    "result_status": "error",
+                }
+            },
+        )
+        return _error_response(
+            request,
+            status_code=500,
+            code="internal_error",
+            message="The request could not be completed.",
+        )
+
+    async def require_local_principal(
+        credentials: Annotated[
+            HTTPAuthorizationCredentials | None,
+            Depends(bearer_scheme),
+        ],
+    ) -> LocalPrincipal:
+        if credentials is None or not hmac.compare_digest(
+            credentials.credentials,
+            runtime_settings.local_token,
+        ):
+            raise APIError(
+                status_code=401,
+                code="authentication_required",
+                message="A valid local token is required.",
+            )
+        return LocalPrincipal(user_id=LOCAL_USER_ID)
+
+    Principal = Annotated[LocalPrincipal, Depends(require_local_principal)]
+
+    @application.get(
+        "/api/health",
+        response_model=HealthResponse,
+        tags=["system"],
+        operation_id="getHealth",
+    )
+    async def health() -> HealthResponse:
+        return HealthResponse(
+            status="ok",
+            service="mind-api",
+            environment=runtime_settings.environment,
+            provider=runtime_provider.name,
+            billable_model_calls=runtime_provider.billable_model_calls,
+        )
+
+    @application.get(
+        "/api/conversations",
+        response_model=ConversationsResponse,
+        responses={401: {"model": ErrorResponse}},
+        tags=["conversations"],
+        operation_id="listConversations",
+    )
+    async def list_conversations(principal: Principal) -> ConversationsResponse:
+        return ConversationsResponse(
+            conversations=runtime_repository.list_conversations(
+                principal.user_id
+            )
+        )
+
+    @application.post(
+        "/api/chat",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "Ordered Server-Sent Events containing text deltas.",
+                "content": {"text/event-stream": {}},
+            },
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
+        tags=["conversations"],
+        operation_id="streamChat",
+    )
+    async def chat(
+        payload: ChatRequest,
+        principal: Principal,
+        request: Request,
+    ) -> StreamingResponse:
+        request_id = _request_id(request)
+        user_id_hash = hashlib.sha256(
+            principal.user_id.encode("utf-8")
+        ).hexdigest()[:16]
+
+        def event_stream() -> Iterator[str]:
+            reply_parts: list[str] = []
+            try:
+                for delta in runtime_provider.stream_reply(
+                    payload.message,
+                    payload.mode,
+                ):
+                    reply_parts.append(delta)
+                    yield _sse_event({"type": "delta", "delta": delta})
+
+                conversation_id = runtime_repository.append_exchange(
+                    payload.conversation_id,
+                    payload.message,
+                    "".join(reply_parts),
+                    payload.mode,
+                    user_id=principal.user_id,
+                )
+                log_event(
+                    logger,
+                    "chat_completed",
+                    request_id=request_id,
+                    user_id_hash=user_id_hash,
+                    conversation_id=conversation_id,
+                    provider=runtime_provider.name,
+                    mode=payload.mode.value,
+                    token_usage=0,
+                    estimated_cost=0,
+                    result_status="success",
+                )
+                yield _sse_event(
+                    {
+                        "type": "done",
+                        "conversation_id": conversation_id,
+                        "request_id": request_id,
+                    }
+                )
+            except ConversationNotFoundError:
+                yield _sse_event(
+                    {
+                        "type": "error",
+                        "code": "conversation_not_found",
+                        "message": "Conversation does not exist for this user.",
+                        "request_id": request_id,
+                    }
+                )
+            except Exception:
+                log_event(
+                    logger,
+                    "chat_failed",
+                    level=logging.ERROR,
+                    request_id=request_id,
+                    user_id_hash=user_id_hash,
+                    provider=runtime_provider.name,
+                    result_status="error",
+                )
+                yield _sse_event(
+                    {
+                        "type": "error",
+                        "code": "generation_failed",
+                        "message": "The response could not be generated.",
+                        "request_id": request_id,
+                    }
+                )
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    return application
+
+
+app = create_app()
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the Mind local API.")
-    parser.add_argument("--port", type=int, default=8000)
+    parser = argparse.ArgumentParser(description="Run the Mind FastAPI service.")
+    parser.add_argument("--host", default=app.state.settings.host)
+    parser.add_argument("--port", type=int, default=app.state.settings.port)
+    parser.add_argument("--reload", action="store_true")
     arguments = parser.parse_args()
 
-    server = create_server(port=arguments.port)
-    host, port = server.server_address
-    print(f"Mind API is ready at http://{host}:{port}", flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    import uvicorn
+
+    uvicorn.run(
+        "backend.app:app",
+        host=arguments.host,
+        port=arguments.port,
+        reload=arguments.reload,
+        log_level=app.state.settings.log_level.lower(),
+    )
 
 
 if __name__ == "__main__":

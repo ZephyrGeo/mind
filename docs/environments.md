@@ -33,6 +33,12 @@ scripts intentionally do not load dotenv files.
 | `MIND_ENV` | `development` in the example | Environment label reserved for upcoming configuration validation |
 | `MIND_LOCAL_TOKEN` | `local-demo-token` | Shared local-only bearer token; never valid for staging or production |
 | `MIND_DATA_PATH` | `work/local-data/conversations.json` | Ignored JSON persistence path |
+| `MIND_API_HOST` | `127.0.0.1` | API bind host; the container uses `0.0.0.0` |
+| `MIND_API_PORT` | `8000` | API port; the container uses `8080` |
+| `MIND_ALLOWED_ORIGINS` | Both local frontend origins | Comma-separated exact CORS origins |
+| `MIND_MAX_REQUEST_BYTES` | `64000` | Maximum accepted HTTP request body |
+| `MIND_MODEL_PROVIDER` | `fake` | Only `fake` is accepted until Gemini is implemented |
+| `MIND_LOG_LEVEL` | `INFO` | Structured API log level |
 | `PORT` | `3000` | Local frontend port |
 | `PYTHON` | `python3` | Optional Python executable used by the local launcher |
 | `MIND_QUIET` | unset | Set to `1` to suppress local API request logs |
@@ -42,6 +48,7 @@ Example:
 ```bash
 export MIND_LOCAL_TOKEN="local-demo-token"
 export MIND_DATA_PATH="work/local-data/conversations.json"
+npm run setup:api
 npm run dev
 ```
 

@@ -6,16 +6,25 @@ import re
 import time
 from collections.abc import Iterator
 
+from .models import AgentMode
 
-class FakeAgent:
+
+class FakeAgentProvider:
     """Produces stable, streamable replies for local development and CI."""
+
+    name = "fake"
+    billable_model_calls = False
 
     def __init__(self, delay_seconds: float = 0.018) -> None:
         self.delay_seconds = delay_seconds
 
-    def create_reply(self, message: str, mode: str = "chat") -> str:
+    def create_reply(
+        self,
+        message: str,
+        mode: AgentMode | str = AgentMode.CHAT,
+    ) -> str:
         normalized = message.strip()
-        if mode == "research":
+        if mode == AgentMode.RESEARCH:
             return (
                 "I’m running in local research simulation mode, so no external model or "
                 "search service was called.\n\n"
@@ -36,9 +45,17 @@ class FakeAgent:
             "later behind the same interface without changing the chat experience."
         )
 
-    def stream_reply(self, message: str, mode: str = "chat") -> Iterator[str]:
+    def stream_reply(
+        self,
+        message: str,
+        mode: AgentMode | str = AgentMode.CHAT,
+    ) -> Iterator[str]:
         reply = self.create_reply(message, mode)
         for token in re.findall(r"\S+\s*|\n", reply):
             if self.delay_seconds:
                 time.sleep(self.delay_seconds)
             yield token
+
+
+# Backward-compatible name for evaluation fixtures and external local imports.
+FakeAgent = FakeAgentProvider

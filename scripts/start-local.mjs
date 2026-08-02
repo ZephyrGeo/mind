@@ -1,7 +1,19 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 
 const children = [];
-const pythonCommand = process.env.PYTHON ?? "python3";
+const root = path.resolve(import.meta.dirname, "..");
+const venvPython =
+  process.platform === "win32"
+    ? path.join(root, ".venv", "Scripts", "python.exe")
+    : path.join(root, ".venv", "bin", "python");
+const venvServer =
+  process.platform === "win32"
+    ? path.join(root, ".venv", "Scripts", "uvicorn.exe")
+    : path.join(root, ".venv", "bin", "uvicorn");
+const pythonCommand =
+  process.env.PYTHON ?? (existsSync(venvServer) ? venvPython : "python3");
 
 function start(command, args, label) {
   const child = spawn(command, args, {
@@ -30,7 +42,18 @@ function shutdown() {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-start(pythonCommand, ["-m", "backend.app", "--port", "8000"], "api");
+start(
+  pythonCommand,
+  [
+    "-m",
+    "backend.app",
+    "--host",
+    process.env.MIND_API_HOST ?? "127.0.0.1",
+    "--port",
+    process.env.MIND_API_PORT ?? "8000",
+  ],
+  "api",
+);
 start(process.execPath, ["scripts/dev.mjs"], "web");
 
 console.log("Starting Mind local workspace...");

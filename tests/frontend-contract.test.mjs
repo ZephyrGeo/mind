@@ -11,7 +11,7 @@ test("built page contains the Mind product shell", async () => {
 
   assert.match(html, /Mind — Personal AI workspace/);
   assert.match(bundle, /What should we make sense of/);
-  assert.match(bundle, /Fake Agent · no model calls · no cloud cost/);
+  assert.match(bundle, /Fake Provider · no model calls · no cloud cost/);
   assert.match(bundle, /Authorization/);
   assert.match(bundle, /text\/event-stream/);
 });
