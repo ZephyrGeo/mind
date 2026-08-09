@@ -41,8 +41,8 @@ class FakeAgentProvider:
             "reply is being streamed back to the React interface without calling an external model.\n\n"
             f"You asked: “{normalized}”\n\n"
             "This first vertical slice proves the conversation path, authentication boundary, "
-            "streaming transport, and local persistence. The Gemini provider can be connected "
-            "later behind the same interface without changing the chat experience."
+            "streaming transport, and local persistence. A hosted provider can be selected "
+            "behind the same interface without changing the chat experience."
         )
 
     def stream_reply(

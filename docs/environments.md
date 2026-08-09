@@ -1,22 +1,22 @@
 # Environment configuration
 
-Mind keeps configuration separate from source code. Milestone 1 runs only in
-local development and test environments; staging and production describe the
-contract that later GCP and Terraform milestones must implement.
+Mind keeps configuration separate from source code. Local development can use
+the Fake Provider or explicitly opt in to DeepSeek; staging and production
+describe the contract that later deployment milestones must implement.
 
 ## Environment matrix
 
 | Setting | Development | Test / CI | Staging | Production |
 |---|---|---|---|---|
 | Purpose | Local product work | Deterministic verification | Integrated pre-release checks | Approved users |
-| Agent provider | Fake | Fake or mock only | Gemini with a capped evaluation budget | Gemini with user quotas |
+| Agent provider | Fake or opt-in DeepSeek | Fake or mocked DeepSeek only | DeepSeek with a capped evaluation budget | DeepSeek with user quotas |
 | Authentication | Local bearer token | In-process test token | Firebase Authentication plus allowlist | Firebase Authentication plus allowlist |
 | Conversation store | Ignored local JSON | Temporary test directory | Firestore staging database | Firestore production database |
 | File store | Not implemented | Temporary fixtures | Dedicated staging bucket | Dedicated production bucket |
 | Frontend | Local Node server | Built artifact | Firebase Hosting preview/staging site | Firebase Hosting production site |
 | API | Local Python server | In-process tests | Dedicated Cloud Run service | Dedicated Cloud Run service |
 | Secrets | Shell environment only | CI secret store when required | Secret Manager | Secret Manager |
-| Model spend | None | None in required CI | Hard daily cap and kill switch | Per-user and global caps |
+| Model spend | None by default; user-funded opt-in | None in required CI | Hard daily cap and kill switch | Per-user and global caps |
 
 Staging and production must use separate GCP resources, service accounts,
 databases, storage buckets, OAuth credentials, and budgets. Production data must
@@ -24,9 +24,9 @@ never be copied into local development or test fixtures.
 
 ## Current local variables
 
-Copy `.env.example` to an ignored local file as a reference, then export the
-values in the shell or process manager before running `npm run dev`. The current
-scripts intentionally do not load dotenv files.
+Copy `.env.example` to the ignored `.env.local` file and edit the local values.
+`npm run dev` loads this file automatically. An environment variable explicitly
+exported in the terminal takes precedence over the same variable in the file.
 
 | Variable | Default | Scope |
 |---|---|---|
@@ -37,20 +37,43 @@ scripts intentionally do not load dotenv files.
 | `MIND_API_PORT` | `8000` | API port; the container uses `8080` |
 | `MIND_ALLOWED_ORIGINS` | Both local frontend origins | Comma-separated exact CORS origins |
 | `MIND_MAX_REQUEST_BYTES` | `64000` | Maximum accepted HTTP request body |
-| `MIND_MODEL_PROVIDER` | `fake` | Only `fake` is accepted until Gemini is implemented |
+| `MIND_MODEL_PROVIDER` | `fake` | `fake` or `deepseek`; DeepSeek is an explicit billable opt-in |
+| `DEEPSEEK_API_KEY` | unset | Required only when `MIND_MODEL_PROVIDER=deepseek`; secret environment value |
+| `MIND_DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | HTTPS API origin; credentials in URLs are rejected |
+| `MIND_DEEPSEEK_MODEL` | `deepseek-v4-flash` | Hosted model ID; `deepseek-v4-pro` is the higher-cost option |
+| `MIND_DEEPSEEK_TIMEOUT_SECONDS` | `120` | Per-request upstream timeout |
+| `MIND_DEEPSEEK_MAX_TOKENS` | `2048` | Maximum generated tokens for one response |
 | `MIND_LOG_LEVEL` | `INFO` | Structured API log level |
 | `PORT` | `3000` | Local frontend port |
 | `PYTHON` | `python3` | Optional Python executable used by the local launcher |
 | `MIND_QUIET` | unset | Set to `1` to suppress local API request logs |
 
-Example:
+One-time local setup:
 
 ```bash
-export MIND_LOCAL_TOKEN="local-demo-token"
-export MIND_DATA_PATH="work/local-data/conversations.json"
+cp .env.example .env.local
+```
+
+For DeepSeek, edit `.env.local` to contain:
+
+```dotenv
+DEEPSEEK_API_KEY=<your DeepSeek API key>
+MIND_MODEL_PROVIDER=deepseek
+MIND_DEEPSEEK_MODEL=deepseek-v4-flash
+```
+
+Then start normally:
+
+```bash
 npm run setup:api
 npm run dev
 ```
+
+Do not place the real key in `.env.example`, source control, frontend code, or
+support messages. `Settings` fails at startup when DeepSeek is selected without
+a key, and `/api/health` reports `billable_model_calls: true` when it is active.
+Only `npm run dev` loads `.env.local`; tests deliberately ignore it so required
+CI and local validation cannot accidentally make billable calls.
 
 The frontend currently embeds the same demonstration token, so changing
 `MIND_LOCAL_TOKEN` alone will make local chat requests fail. This is an
@@ -58,10 +81,11 @@ explicit milestone 1 limitation, not a production authentication design.
 
 ## Test and CI guarantees
 
-Required CI runs `npm run test:all` with the Fake Agent. Tests must not require
-GCP credentials, search credentials, OAuth tokens, network access, or a
-billable model. Any future live-model evaluation must be a separate, explicitly
-budgeted job and must never replace the required zero-cost suite.
+Required CI runs `npm run test:all` with the Fake Agent and simulated DeepSeek
+HTTP streams. Tests must not require model credentials, GCP credentials, search
+credentials, OAuth tokens, network access, or a billable model. Any live-model
+evaluation must be a separate, explicitly budgeted job and must never replace
+the required zero-cost suite.
 
 Tests that write data must use temporary paths rather than
 `work/local-data/conversations.json`.

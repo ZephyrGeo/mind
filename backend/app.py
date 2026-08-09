@@ -19,9 +19,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import DEFAULT_LOCAL_TOKEN, Settings
+from .deepseek_provider import DeepSeekProvider
 from .errors import APIError
 from .fake_agent import FakeAgentProvider
-from .model_provider import ModelProvider
+from .model_provider import ModelProvider, ModelProviderError
 from .models import (
     ChatRequest,
     ConversationsResponse,
@@ -43,6 +44,24 @@ from .store import (
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 LOCAL_TOKEN = DEFAULT_LOCAL_TOKEN
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def create_model_provider(settings: Settings) -> ModelProvider:
+    """Build the configured provider without making a model request."""
+
+    if settings.provider == "fake":
+        return FakeAgentProvider()
+    if settings.provider == "deepseek":
+        if settings.deepseek_api_key is None:
+            raise ValueError("DeepSeek API key is missing.")
+        return DeepSeekProvider(
+            api_key=settings.deepseek_api_key,
+            model=settings.deepseek_model,
+            base_url=settings.deepseek_base_url,
+            timeout_seconds=settings.deepseek_timeout_seconds,
+            max_tokens=settings.deepseek_max_tokens,
+        )
+    raise ValueError(f"Unsupported model provider: {settings.provider}")
 
 
 def is_authorized_header(
@@ -122,7 +141,7 @@ def create_app(
     runtime_repository = repository or JsonConversationRepository(
         runtime_settings.data_path
     )
-    runtime_provider = provider or FakeAgentProvider()
+    runtime_provider = provider or create_model_provider(runtime_settings)
     logger = configure_logging(
         runtime_settings.log_level,
         runtime_settings.quiet,
@@ -132,11 +151,10 @@ def create_app(
         title="Mind Personal Agent API",
         summary="Streaming API and replaceable Agent Kernel boundaries.",
         description=(
-            "Milestone 2 exposes a zero-cost Fake ModelProvider through the same "
-            "typed interfaces that will later host Gemini, Firestore, tools, and "
-            "checkpointed Deep Research."
+            "Mind exposes local and hosted ModelProvider implementations through "
+            "the same typed interface, with explicit billing and failure signals."
         ),
-        version="0.2.0",
+        version="0.3.0",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -375,8 +393,12 @@ def create_app(
                     conversation_id=conversation_id,
                     provider=runtime_provider.name,
                     mode=payload.mode.value,
-                    token_usage=0,
-                    estimated_cost=0,
+                    token_usage=(
+                        None if runtime_provider.billable_model_calls else 0
+                    ),
+                    estimated_cost=(
+                        None if runtime_provider.billable_model_calls else 0
+                    ),
                     result_status="success",
                 )
                 yield _sse_event(
@@ -392,6 +414,27 @@ def create_app(
                         "type": "error",
                         "code": "conversation_not_found",
                         "message": "Conversation does not exist for this user.",
+                        "request_id": request_id,
+                    }
+                )
+            except ModelProviderError as error:
+                log_event(
+                    logger,
+                    "chat_failed",
+                    level=logging.ERROR,
+                    request_id=request_id,
+                    user_id_hash=user_id_hash,
+                    provider=runtime_provider.name,
+                    provider_error_code=error.code,
+                    retryable=error.retryable,
+                    result_status="error",
+                )
+                yield _sse_event(
+                    {
+                        "type": "error",
+                        "code": error.code,
+                        "message": error.public_message,
+                        "retryable": error.retryable,
                         "request_id": request_id,
                     }
                 )

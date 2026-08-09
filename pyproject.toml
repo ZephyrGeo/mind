@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mind-personal-agent-api"
-version = "0.2.0"
-description = "FastAPI foundation and replaceable Agent Kernel for Mind."
+version = "0.3.0"
+description = "FastAPI Agent Kernel with local and DeepSeek model providers."
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
 dependencies = [

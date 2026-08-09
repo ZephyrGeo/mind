@@ -1,7 +1,7 @@
 # Mind API
 
-The FastAPI service exposes a typed, streaming contract while the model
-provider remains the deterministic, zero-cost Fake Provider.
+The FastAPI service exposes a typed, streaming contract with a deterministic
+Fake Provider by default and an opt-in DeepSeek Provider for real model calls.
 
 Interactive documentation is available while the API is running:
 
@@ -31,9 +31,10 @@ authentication and will be replaced by verified Firebase ID tokens.
 }
 ```
 
-`mode` accepts `chat` or `research`. Research remains a simulation until the
-checkpointed workflow and search tools are implemented. Attachment entries only
-carry staged filename and size metadata; no file content is uploaded yet.
+`mode` accepts `chat` or `research`. With DeepSeek enabled, research mode uses
+the model's thinking mode, but the checkpointed workflow and search tools are
+not implemented yet. Attachment entries only carry staged filename and size
+metadata; no file content is uploaded yet.
 
 ## Streaming response
 
@@ -48,8 +49,13 @@ data: {"type":"done","conversation_id":"...","request_id":"..."}
 ```
 
 If generation fails after streaming has begun, the final frame has
-`"type":"error"`. HTTP validation and authentication errors use the standard
-JSON envelope below.
+`"type":"error"`. Provider failures include a stable `code` and `retryable`
+boolean. HTTP validation and authentication errors use the standard JSON
+envelope below.
+
+```text
+data: {"type":"error","code":"provider_rate_limited","message":"...","retryable":true,"request_id":"..."}
+```
 
 ## Error envelope
 
@@ -76,8 +82,18 @@ or hyphens.
 
 ## Architecture boundaries
 
-`ModelProvider` owns model streaming. `FakeAgentProvider` is its current
-implementation and declares that it makes no billable model calls.
+`ModelProvider` owns model streaming. `FakeAgentProvider` declares that it makes
+no billable calls. `DeepSeekProvider` uses the OpenAI-compatible streaming Chat
+Completions endpoint and declares that calls are billable. The health endpoint
+lets the UI display this distinction before a message is sent.
+
+Chat mode disables DeepSeek thinking for lower latency. Research mode enables
+thinking but streams only final answer content; reasoning content is not exposed
+or persisted. The current request contains one user turn and a system prompt;
+multi-turn model context will be added when repository reads are introduced.
+
+The wire format and current model IDs follow the
+[official DeepSeek Chat Completions documentation](https://api-docs.deepseek.com/api/create-chat-completion).
 
 `ConversationRepository` owns tenant-scoped conversation reads and atomic
 exchange writes. `JsonConversationRepository` is the current ignored local
@@ -86,4 +102,3 @@ implementation. Firestore can replace it without changing route handlers.
 The shared Pydantic models define `User`, `Conversation`, `Message`,
 `Attachment`, `ResearchJob`, `Memory`, `Routine`, and `ToolCall` before their
 production repositories and endpoints are implemented.
-

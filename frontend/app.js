@@ -231,6 +231,7 @@ function Composer({
   attachments,
   onFiles,
   onVoice,
+  providerInfo,
 }) {
   function onKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -307,7 +308,13 @@ function Composer({
     h(
       "div",
       { className: "composer-footnote" },
-      h("span", null, "Fake Provider · no model calls · no cloud cost"),
+      h(
+        "span",
+        null,
+        providerInfo.billable
+          ? "DeepSeek Provider · model calls may incur cost"
+          : "Fake Provider · no model calls · no cloud cost",
+      ),
       h("span", null, "Enter to send · Shift+Enter for a new line"),
     ),
   );
@@ -324,17 +331,31 @@ function App() {
   const [attachments, setAttachments] = useState([]);
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [providerInfo, setProviderInfo] = useState({
+    name: "fake",
+    billable: false,
+  });
   const abortRef = useRef(null);
   const endRef = useRef(null);
 
   async function loadConversations() {
     try {
-      const response = await fetch(`${API_BASE}/api/conversations`, {
-        headers: { Authorization: `Bearer ${LOCAL_TOKEN}` },
-      });
-      if (!response.ok) throw new Error("API unavailable");
-      const payload = await response.json();
+      const [healthResponse, response] = await Promise.all([
+        fetch(`${API_BASE}/api/health`),
+        fetch(`${API_BASE}/api/conversations`, {
+          headers: { Authorization: `Bearer ${LOCAL_TOKEN}` },
+        }),
+      ]);
+      if (!healthResponse.ok || !response.ok) throw new Error("API unavailable");
+      const [health, payload] = await Promise.all([
+        healthResponse.json(),
+        response.json(),
+      ]);
       setConversations(payload.conversations);
+      setProviderInfo({
+        name: health.provider,
+        billable: health.billable_model_calls,
+      });
       setApiState("online");
     } catch {
       setApiState("offline");
@@ -430,6 +451,20 @@ function App() {
           if (event.type === "done") {
             setConversationId(event.conversation_id);
           }
+          if (event.type === "error") {
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId
+                  ? { ...message, content: event.message }
+                  : message,
+              ),
+            );
+            setToast(
+              event.retryable
+                ? "The model request failed. You can retry."
+                : "Check the model provider configuration.",
+            );
+          }
         }
       }
 
@@ -444,7 +479,7 @@ function App() {
               ? {
                   ...message,
                   content:
-                    "I could not reach the local API. Start the workspace and try again; no message was sent to an external model.",
+                    "Mind could not complete the request. Check the local API and model provider settings, then try again.",
                 }
               : message,
           ),
@@ -512,6 +547,7 @@ function App() {
           attachments,
           onFiles: stageFiles,
           onVoice: () => setToast("Voice input is planned for phase 2."),
+          providerInfo,
         }),
       ),
     ),

@@ -9,7 +9,7 @@ from .models import AgentMode
 
 
 class ModelProvider(Protocol):
-    """The minimal streaming contract implemented by Fake and Gemini providers."""
+    """The minimal streaming contract implemented by local and hosted providers."""
 
     name: str
     billable_model_calls: bool
@@ -18,3 +18,19 @@ class ModelProvider(Protocol):
         """Yield ordered text deltas for a single assistant response."""
 
         ...
+
+
+class ModelProviderError(RuntimeError):
+    """Safe, provider-independent failure surfaced after streaming has begun."""
+
+    def __init__(
+        self,
+        code: str,
+        public_message: str,
+        *,
+        retryable: bool,
+    ) -> None:
+        super().__init__(code)
+        self.code = code
+        self.public_message = public_message
+        self.retryable = retryable

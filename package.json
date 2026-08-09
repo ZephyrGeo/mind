@@ -1,17 +1,17 @@
 {
   "name": "mind-personal-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
     "setup:api": "node scripts/setup-api.mjs",
-    "dev": "node scripts/start-local.mjs",
+    "dev": "node --env-file-if-exists=.env.local scripts/start-local.mjs",
     "dev:web": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
     "preview": "node scripts/dev.mjs --no-watch",
-    "test": "npm run build && node --test tests/frontend-contract.test.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "test:backend": "node scripts/test-backend.mjs",
     "test:all": "npm test && npm run test:backend"
   },
