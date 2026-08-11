@@ -9,50 +9,163 @@ const API_BASE = window.__MIND_API__ ?? "http://127.0.0.1:8000";
 const LOCAL_TOKEN = "local-demo-token";
 
 const navigation = [
-  { symbol: "◎", label: "Chat", active: true },
-  { symbol: "⌕", label: "Research" },
-  { symbol: "◇", label: "Memory" },
-  { symbol: "↻", label: "Heartbeats" },
+  { icon: "chat-circle", label: "Chat", active: true },
+  { icon: "magnifying-glass", label: "Research" },
+  { icon: "diamond", label: "Memory" },
+  { icon: "arrow-clockwise", label: "Heartbeats" },
 ];
 
 const suggestions = [
   {
-    eyebrow: "PLAN",
     title: "Turn a fuzzy goal into next steps",
     prompt: "Help me turn a vague product idea into a concrete one-week plan.",
   },
   {
-    eyebrow: "RESEARCH",
     title: "Map a topic and its open questions",
     prompt: "Create a research plan for evaluating personal AI agent products.",
   },
   {
-    eyebrow: "REFLECT",
     title: "Find the signal in my notes",
     prompt: "Show me how you would extract decisions, risks, and follow-ups from meeting notes.",
   },
 ];
 
-function Brand() {
+function Icon({ name, weight = "regular", className = "" }) {
+  const weightClass = weight === "fill" ? "ph-fill" : "ph";
+  return h("i", {
+    className: `${weightClass} ph-${name}${className ? ` ${className}` : ""}`,
+    "aria-hidden": "true",
+  });
+}
+
+function conversationGroupLabel(updatedAt, now = new Date()) {
+  const updatedDate = new Date(updatedAt);
+  if (Number.isNaN(updatedDate.getTime())) return "Older";
+
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  const conversationDay = Date.UTC(
+    updatedDate.getFullYear(),
+    updatedDate.getMonth(),
+    updatedDate.getDate(),
+  );
+  const daysAgo = Math.floor((today - conversationDay) / 86_400_000);
+
+  if (daysAgo <= 0) return "Today";
+  if (daysAgo === 1) return "Yesterday";
+  if (daysAgo < 7) return "Previous 7 Days";
+  if (daysAgo < 30) return "Previous 30 Days";
+
+  return updatedDate.toLocaleDateString(undefined, {
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function groupConversations(conversations) {
+  const groups = [];
+  for (const conversation of conversations) {
+    const label = conversationGroupLabel(conversation.updated_at);
+    const currentGroup = groups.at(-1);
+    if (currentGroup?.label === label) {
+      currentGroup.conversations.push(conversation);
+    } else {
+      groups.push({ label, conversations: [conversation] });
+    }
+  }
+  return groups;
+}
+
+function formatConversationTime(updatedAt) {
+  const date = new Date(updatedAt);
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  const isToday =
+    date.getFullYear() === today.getFullYear() &&
+    date.getMonth() === today.getMonth() &&
+    date.getDate() === today.getDate();
+  if (!isToday) return "";
+  return date.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function Brand({ onCollapse }) {
   return h(
     "div",
     { className: "brand" },
-    h("span", { className: "brand-mark", "aria-hidden": "true" }, "✦"),
+    h(
+      "span",
+      { className: "brand-mark", "aria-hidden": "true" },
+      h(Icon, { name: "star-four", weight: "fill" }),
+    ),
     h("span", null, "Mind"),
-    h("span", { className: "brand-alpha" }, "LOCAL"),
+    h(
+      "button",
+      {
+        className: "sidebar-toggle",
+        type: "button",
+        onClick: onCollapse,
+        "aria-label": "Collapse sidebar",
+        title: "Collapse sidebar",
+      },
+      h(Icon, { name: "sidebar-simple" }),
+    ),
   );
 }
 
-function Sidebar({ conversations, onNewChat }) {
+function Sidebar({
+  conversations,
+  activeConversationId,
+  onCollapse,
+  onNewChat,
+  onOpenConversation,
+  onDeleteConversation,
+}) {
+  const [conversationQuery, setConversationQuery] = useState("");
+  const searchRef = useRef(null);
+  const normalizedQuery = conversationQuery.trim().toLocaleLowerCase();
+  const visibleConversations = normalizedQuery
+    ? conversations.filter((conversation) =>
+        conversation.title.toLocaleLowerCase().includes(normalizedQuery),
+      )
+    : conversations;
+  const conversationGroups = groupConversations(visibleConversations);
+
+  useEffect(() => {
+    function focusConversationSearch(event) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", focusConversationSearch);
+    return () => window.removeEventListener("keydown", focusConversationSearch);
+  }, []);
+
   return h(
     "aside",
     { className: "sidebar" },
-    h(Brand),
+    h(Brand, { onCollapse }),
     h(
       "button",
       { className: "new-chat-button", type: "button", onClick: onNewChat },
-      h("span", { "aria-hidden": "true" }, "＋"),
-      "New conversation",
+      h(Icon, { name: "plus" }),
+      h("span", null, "New conversation"),
+    ),
+    h(
+      "label",
+      { className: "conversation-search" },
+      h(Icon, { name: "magnifying-glass" }),
+      h("input", {
+        ref: searchRef,
+        type: "search",
+        value: conversationQuery,
+        onChange: (event) => setConversationQuery(event.target.value),
+        placeholder: "Search conversations",
+        "aria-label": "Search conversations",
+      }),
+      h("kbd", null, "⌘K"),
     ),
     h(
       "nav",
@@ -65,29 +178,70 @@ function Sidebar({ conversations, onNewChat }) {
             type: "button",
             key: item.label,
           },
-          h("span", { className: "nav-symbol", "aria-hidden": "true" }, item.symbol),
-          item.label,
+          h(Icon, { name: item.icon, className: "nav-symbol" }),
+          h("span", null, item.label),
           item.active ? h("span", { className: "nav-indicator" }) : null,
         ),
       ),
     ),
-    h("div", { className: "sidebar-section-label" }, "RECENT"),
     h(
       "div",
       { className: "conversation-list" },
-      conversations.length
-        ? conversations.slice(0, 5).map((conversation) =>
+      visibleConversations.length
+        ? conversationGroups.map((group) =>
             h(
-              "button",
-              { className: "conversation-item", type: "button", key: conversation.id },
-              h("span", null, conversation.title),
-              h("small", null, `${conversation.message_count} messages`),
+              "section",
+              { className: "conversation-group", key: group.label },
+              h("div", { className: "conversation-group-label" }, group.label),
+              group.conversations.map((conversation) => {
+                const updatedTime = formatConversationTime(conversation.updated_at);
+                return h(
+                  "div",
+                  { className: "conversation-row", key: conversation.id },
+                  h(
+                    "button",
+                    {
+                      className: `conversation-item${
+                        conversation.id === activeConversationId ? " active" : ""
+                      }`,
+                      type: "button",
+                      onClick: () => onOpenConversation(conversation),
+                    },
+                    h(
+                      "span",
+                      { className: "conversation-title" },
+                      conversation.title,
+                    ),
+                    updatedTime
+                      ? h("time", { dateTime: conversation.updated_at }, updatedTime)
+                      : null,
+                    h(
+                      "small",
+                      null,
+                      `${conversation.message_count} messages`,
+                    ),
+                  ),
+                  h(
+                    "button",
+                    {
+                      className: "conversation-delete",
+                      type: "button",
+                      "aria-label": `Delete ${conversation.title}`,
+                      title: "Delete conversation",
+                      onClick: () => onDeleteConversation(conversation),
+                    },
+                    h(Icon, { name: "trash" }),
+                  ),
+                );
+              }),
             ),
           )
         : h(
             "div",
             { className: "empty-history" },
-            "Your conversations will appear here.",
+            normalizedQuery
+              ? `No conversations match “${conversationQuery.trim()}”.`
+              : "Your conversations will appear here.",
           ),
     ),
     h(
@@ -100,12 +254,31 @@ function Sidebar({ conversations, onNewChat }) {
         h("strong", null, "Local developer"),
         h("span", null, "Private workspace"),
       ),
-      h("button", { className: "icon-button ghost", type: "button", "aria-label": "Settings" }, "···"),
+      h(
+        "button",
+        {
+          className: "icon-button ghost",
+          type: "button",
+          "aria-label": "Settings",
+        },
+        h(Icon, { name: "dots-three" }),
+      ),
     ),
   );
 }
 
-function Header({ apiState, mode, onModeChange, onToggleSidebar }) {
+function Header({
+  apiState,
+  conversationTitle,
+  providerInfo,
+  sidebarCollapsed,
+  onToggleSidebar,
+  onProviderInfo,
+}) {
+  const providerDetail = providerInfo.billable
+    ? "DeepSeek Provider · model calls may incur cost"
+    : "Fake Provider · no model calls · no cloud cost";
+
   return h(
     "header",
     { className: "topbar" },
@@ -115,76 +288,76 @@ function Header({ apiState, mode, onModeChange, onToggleSidebar }) {
       h(
         "button",
         {
-          className: "mobile-menu",
+          className: `mobile-menu${sidebarCollapsed ? " visible" : ""}`,
           type: "button",
           onClick: onToggleSidebar,
-          "aria-label": "Open navigation",
+          "aria-label": "Open sidebar",
+          title: "Open sidebar",
         },
-        "☰",
+        h(Icon, { name: "sidebar-simple" }),
       ),
-      h("div", null, h("h1", null, "New conversation"), h("p", null, "A calm place to think with your agent")),
-    ),
-    h(
-      "div",
-      { className: "topbar-actions" },
       h(
-        "div",
-        { className: "mode-switch", role: "group", "aria-label": "Agent mode" },
-        ["chat", "research"].map((option) =>
+        "button",
+        {
+          className: "conversation-selector",
+          type: "button",
+          onClick: onProviderInfo,
+          title: providerDetail,
+        },
+        h(
+          "span",
+          { className: "conversation-selector-copy" },
+          h("strong", null, conversationTitle),
           h(
-            "button",
-            {
-              key: option,
-              className: mode === option ? "selected" : "",
-              type: "button",
-              onClick: () => onModeChange(option),
-            },
-            option === "chat" ? "Chat" : "Research",
+            "small",
+            null,
+            providerInfo.billable ? "DeepSeek model" : "Local model",
           ),
         ),
+        h(Icon, { name: "caret-down" }),
       ),
-      h(
-        "span",
-        { className: `api-status ${apiState}` },
-        h("span", { className: "status-dot" }),
-        apiState === "online" ? "Local API ready" : apiState === "checking" ? "Checking API" : "API offline",
-      ),
+    ),
+    h(
+      "span",
+      { className: `api-status ${apiState}` },
+      h("span", { className: "status-dot" }),
+      apiState === "online"
+        ? "Local API ready"
+        : apiState === "checking"
+          ? "Checking API"
+          : "API offline",
     ),
   );
 }
 
-function Welcome({ onSuggestion }) {
+function Welcome() {
   return h(
-    "section",
+    "div",
     { className: "welcome" },
     h(
-      "div",
+      "span",
       { className: "welcome-mark", "aria-hidden": "true" },
-      h("span", null, "✦"),
+      h(Icon, { name: "star-four", weight: "fill" }),
     ),
-    h("p", { className: "overline" }, "YOUR PERSONAL THINKING PARTNER"),
     h("h2", null, "What should we make sense of?"),
-    h(
-      "p",
-      { className: "welcome-copy" },
-      "Ask a question, shape a plan, or start a deeper investigation. Mind keeps the process visible and under your control.",
-    ),
-    h(
-      "div",
-      { className: "suggestion-grid" },
-      suggestions.map((suggestion) =>
-        h(
-          "button",
-          {
-            className: "suggestion-card",
-            type: "button",
-            key: suggestion.eyebrow,
-            onClick: () => onSuggestion(suggestion.prompt),
-          },
-          h("span", null, suggestion.eyebrow),
-          h("strong", null, suggestion.title),
-          h("i", { "aria-hidden": "true" }, "↗"),
-        ),
+  );
+}
+
+function SuggestionList({ onSuggestion }) {
+  return h(
+    "div",
+    { className: "suggestion-list", "aria-label": "Suggested prompts" },
+    suggestions.map((suggestion) =>
+      h(
+        "button",
+        {
+          className: "suggestion-chip",
+          type: "button",
+          key: suggestion.title,
+          onClick: () => onSuggestion(suggestion.prompt),
+        },
+        h(Icon, { name: "star-four", weight: "fill" }),
+        h("span", null, suggestion.title),
       ),
     ),
   );
@@ -197,7 +370,9 @@ function Message({ message }) {
     h(
       "div",
       { className: "message-avatar", "aria-hidden": "true" },
-      message.role === "assistant" ? "✦" : "Y",
+      message.role === "assistant"
+        ? h(Icon, { name: "star-four", weight: "fill" })
+        : "FY",
     ),
     h(
       "div",
@@ -221,6 +396,45 @@ function Conversation({ messages, endRef }) {
   );
 }
 
+function ModeSwitch({ mode, onModeChange }) {
+  return h(
+    "div",
+    { className: "composer-mode-switch", role: "group", "aria-label": "Agent mode" },
+    [
+      { value: "chat", label: "Chat", icon: "chat-circle" },
+      { value: "research", label: "Research", icon: "magnifying-glass" },
+    ].map((option) =>
+      h(
+        "button",
+        {
+          key: option.value,
+          className: mode === option.value ? "selected" : "",
+          type: "button",
+          onClick: () => onModeChange(option.value),
+        },
+        h(Icon, { name: option.icon }),
+        option.label,
+      ),
+    ),
+  );
+}
+
+function AttachmentList({ attachments }) {
+  if (!attachments.length) return null;
+  return h(
+    "div",
+    { className: "attachment-row" },
+    attachments.map((file) =>
+      h(
+        "span",
+        { className: "attachment-chip", key: `${file.name}-${file.size}` },
+        h(Icon, { name: "file-text" }),
+        file.name,
+      ),
+    ),
+  );
+}
+
 function Composer({
   value,
   onChange,
@@ -228,10 +442,10 @@ function Composer({
   onStop,
   isStreaming,
   mode,
+  onModeChange,
   attachments,
   onFiles,
   onVoice,
-  providerInfo,
 }) {
   function onKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -243,15 +457,7 @@ function Composer({
   return h(
     "div",
     { className: "composer-wrap" },
-    attachments.length
-      ? h(
-          "div",
-          { className: "attachment-row" },
-          attachments.map((file) =>
-            h("span", { className: "attachment-chip", key: `${file.name}-${file.size}` }, `▤ ${file.name}`),
-          ),
-        )
-      : null,
+    h(AttachmentList, { attachments }),
     h(
       "div",
       { className: "composer" },
@@ -272,50 +478,59 @@ function Composer({
         h(
           "div",
           { className: "composer-tools" },
+          h(ModeSwitch, { mode, onModeChange }),
+          h("span", { className: "toolbar-divider", "aria-hidden": "true" }),
           h(
             "label",
             { className: "tool-button", title: "Stage a file for the next phase" },
-            "＋",
+            h(Icon, { name: "paperclip" }),
             h("input", { type: "file", multiple: true, onChange: onFiles }),
           ),
           h(
             "button",
-            { className: "tool-button", type: "button", onClick: onVoice, "aria-label": "Voice input" },
-            "◉",
+            {
+              className: "tool-button",
+              type: "button",
+              onClick: onVoice,
+              "aria-label": "Voice input",
+            },
+            h(Icon, { name: "microphone" }),
           ),
+        ),
+        h(
+          "div",
+          { className: "composer-actions" },
           h(
             "span",
             { className: "context-meter" },
-            h("span", { "aria-hidden": "true" }, "◌"),
-            "Local context",
+            h("span", { className: "context-dot", "aria-hidden": "true" }),
+            h("span", null, "Local context"),
+            h(Icon, { name: "caret-down" }),
           ),
+          isStreaming
+            ? h(
+                "button",
+                {
+                  className: "send-button stop",
+                  type: "button",
+                  onClick: onStop,
+                  "aria-label": "Stop generating",
+                },
+                h(Icon, { name: "stop", weight: "fill" }),
+              )
+            : h(
+                "button",
+                {
+                  className: "send-button",
+                  type: "button",
+                  onClick: onSend,
+                  disabled: !value.trim(),
+                  "aria-label": "Send message",
+                },
+                h(Icon, { name: "arrow-up" }),
+              ),
         ),
-        isStreaming
-          ? h("button", { className: "send-button stop", type: "button", onClick: onStop }, "■")
-          : h(
-              "button",
-              {
-                className: "send-button",
-                type: "button",
-                onClick: onSend,
-                disabled: !value.trim(),
-                "aria-label": "Send message",
-              },
-              "↑",
-            ),
       ),
-    ),
-    h(
-      "div",
-      { className: "composer-footnote" },
-      h(
-        "span",
-        null,
-        providerInfo.billable
-          ? "DeepSeek Provider · model calls may incur cost"
-          : "Fake Provider · no model calls · no cloud cost",
-      ),
-      h("span", null, "Enter to send · Shift+Enter for a new line"),
     ),
   );
 }
@@ -327,14 +542,13 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [conversationId, setConversationId] = useState(null);
+  const [conversationTitle, setConversationTitle] = useState("New conversation");
   const [isStreaming, setIsStreaming] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [providerInfo, setProviderInfo] = useState({
-    name: "fake",
-    billable: false,
-  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [providerInfo, setProviderInfo] = useState({ name: "fake", billable: false });
   const abortRef = useRef(null);
   const endRef = useRef(null);
 
@@ -379,10 +593,74 @@ function App() {
   function resetConversation() {
     abortRef.current?.abort();
     setConversationId(null);
+    setConversationTitle("New conversation");
     setMessages([]);
     setInput("");
     setAttachments([]);
     setSidebarOpen(false);
+  }
+
+  async function openConversation(conversation) {
+    abortRef.current?.abort();
+    setIsStreaming(false);
+    setApiState("checking");
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/conversations/${conversation.id}`,
+        { headers: { Authorization: `Bearer ${LOCAL_TOKEN}` } },
+      );
+      if (!response.ok) throw new Error("Conversation unavailable");
+      const payload = await response.json();
+      setConversationId(payload.id);
+      setConversationTitle(payload.title);
+      setMode(payload.mode);
+      setMessages(
+        payload.messages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+        })),
+      );
+      setInput("");
+      setAttachments([]);
+      setSidebarOpen(false);
+      setApiState("online");
+    } catch {
+      setApiState("offline");
+      setToast("The conversation could not be opened.");
+    }
+  }
+
+  async function deleteConversation(conversation) {
+    const confirmed = window.confirm(
+      `Delete “${conversation.title}”? All messages in this conversation will be permanently removed. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    if (conversation.id === conversationId) {
+      abortRef.current?.abort();
+      setIsStreaming(false);
+    }
+    setApiState("checking");
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/conversations/${conversation.id}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${LOCAL_TOKEN}` },
+        },
+      );
+      if (response.status !== 204) throw new Error("Delete failed");
+      setConversations((current) =>
+        current.filter((item) => item.id !== conversation.id),
+      );
+      if (conversation.id === conversationId) resetConversation();
+      setApiState("online");
+      setToast("Conversation deleted.");
+    } catch {
+      setApiState("offline");
+      setToast("The conversation could not be deleted.");
+    }
   }
 
   async function sendMessage() {
@@ -397,6 +675,9 @@ function App() {
       { id: assistantId, role: "assistant", content: "" },
     ]);
     setInput("");
+    if (!conversationId) {
+      setConversationTitle(text.replace(/\s+/g, " ").slice(0, 56));
+    }
     setIsStreaming(true);
     setApiState("checking");
 
@@ -415,7 +696,10 @@ function App() {
           conversation_id: conversationId,
           message: text,
           mode,
-          attachments: attachments.map((file) => ({ name: file.name, size: file.size })),
+          attachments: attachments.map((file) => ({
+            name: file.name,
+            size: file.size,
+          })),
         }),
         signal: controller.signal,
       });
@@ -448,9 +732,7 @@ function App() {
               ),
             );
           }
-          if (event.type === "done") {
-            setConversationId(event.conversation_id);
-          }
+          if (event.type === "done") setConversationId(event.conversation_id);
           if (event.type === "error") {
             setMessages((current) =>
               current.map((message) =>
@@ -501,13 +783,51 @@ function App() {
     const files = [...event.target.files];
     setAttachments(files);
     if (files.length) {
-      setToast(`${files.length} file${files.length > 1 ? "s" : ""} staged locally. Ingestion arrives in phase 2.`);
+      setToast(
+        `${files.length} file${files.length > 1 ? "s" : ""} staged locally. Ingestion arrives in phase 2.`,
+      );
     }
+  }
+
+  const composerProps = {
+    value: input,
+    onChange: setInput,
+    onSend: sendMessage,
+    onStop: stopStreaming,
+    isStreaming,
+    mode,
+    onModeChange: setMode,
+    attachments,
+    onFiles: stageFiles,
+    onVoice: () => setToast("Voice input is planned for phase 2."),
+  };
+
+  function selectSuggestion(prompt) {
+    setInput(prompt);
+    requestAnimationFrame(() => document.querySelector("textarea")?.focus());
+  }
+
+  function collapseSidebar() {
+    if (window.matchMedia("(max-width: 980px)").matches) {
+      setSidebarOpen(false);
+      return;
+    }
+    setSidebarCollapsed(true);
+  }
+
+  function openSidebar() {
+    if (window.matchMedia("(max-width: 980px)").matches) {
+      setSidebarOpen((value) => !value);
+      return;
+    }
+    setSidebarCollapsed(false);
   }
 
   return h(
     "div",
-    { className: "app-shell" },
+    {
+      className: `app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`,
+    },
     h("div", {
       className: `sidebar-backdrop${sidebarOpen ? " visible" : ""}`,
       onClick: () => setSidebarOpen(false),
@@ -515,40 +835,48 @@ function App() {
     h(
       "div",
       { className: `sidebar-container${sidebarOpen ? " open" : ""}` },
-      h(Sidebar, { conversations, onNewChat: resetConversation }),
+      h(Sidebar, {
+        conversations,
+        activeConversationId: conversationId,
+        onCollapse: collapseSidebar,
+        onNewChat: resetConversation,
+        onOpenConversation: openConversation,
+        onDeleteConversation: deleteConversation,
+      }),
     ),
     h(
       "main",
       { className: "main-panel" },
       h(Header, {
         apiState,
-        mode,
-        onModeChange: setMode,
-        onToggleSidebar: () => setSidebarOpen((value) => !value),
+        conversationTitle,
+        providerInfo,
+        sidebarCollapsed,
+        onToggleSidebar: openSidebar,
+        onProviderInfo: () =>
+          setToast(
+            providerInfo.billable
+              ? "DeepSeek is configured through the project-local environment."
+              : "The deterministic local provider is active.",
+          ),
       }),
       h(
         "div",
         { className: `workspace${messages.length ? " has-messages" : ""}` },
         messages.length
-          ? h(Conversation, { messages, endRef })
-          : h(Welcome, {
-              onSuggestion: (prompt) => {
-                setInput(prompt);
-                document.querySelector("textarea")?.focus();
-              },
-            }),
-        h(Composer, {
-          value: input,
-          onChange: setInput,
-          onSend: sendMessage,
-          onStop: stopStreaming,
-          isStreaming,
-          mode,
-          attachments,
-          onFiles: stageFiles,
-          onVoice: () => setToast("Voice input is planned for phase 2."),
-          providerInfo,
-        }),
+          ? h(
+              "div",
+              { className: "conversation-workspace" },
+              h(Conversation, { messages, endRef }),
+              h(Composer, composerProps),
+            )
+          : h(
+              "section",
+              { className: "empty-workspace" },
+              h(Welcome),
+              h(Composer, composerProps),
+              h(SuggestionList, { onSuggestion: selectSuggestion }),
+            ),
       ),
     ),
     toast ? h("div", { className: "toast", role: "status" }, toast) : null,

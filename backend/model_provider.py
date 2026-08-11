@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Protocol
 
-from .models import AgentMode
+from .models import AgentMode, ModelMessage
 
 
 class ModelProvider(Protocol):
@@ -14,7 +14,13 @@ class ModelProvider(Protocol):
     name: str
     billable_model_calls: bool
 
-    def stream_reply(self, message: str, mode: AgentMode) -> Iterator[str]:
+    def stream_reply(
+        self,
+        message: str,
+        mode: AgentMode,
+        *,
+        history: Sequence[ModelMessage] = (),
+    ) -> Iterator[str]:
         """Yield ordered text deltas for a single assistant response."""
 
         ...

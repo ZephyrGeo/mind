@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Iterator
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -19,12 +19,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import DEFAULT_LOCAL_TOKEN, Settings
+from .conversation_context import select_recent_history
 from .deepseek_provider import DeepSeekProvider
 from .errors import APIError
 from .fake_agent import FakeAgentProvider
 from .model_provider import ModelProvider, ModelProviderError
 from .models import (
     ChatRequest,
+    Conversation,
     ConversationsResponse,
     ErrorBody,
     ErrorDetail,
@@ -154,7 +156,7 @@ def create_app(
             "Mind exposes local and hosted ModelProvider implementations through "
             "the same typed interface, with explicit billing and failure signals."
         ),
-        version="0.3.0",
+        version="0.5.0",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -194,7 +196,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(runtime_settings.allowed_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=[
             "Accept",
             "Authorization",
@@ -342,6 +344,59 @@ def create_app(
             )
         )
 
+    @application.get(
+        "/api/conversations/{conversation_id}",
+        response_model=Conversation,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+        },
+        tags=["conversations"],
+        operation_id="getConversation",
+    )
+    async def get_conversation(
+        conversation_id: uuid.UUID,
+        principal: Principal,
+    ) -> Conversation:
+        try:
+            return runtime_repository.get_conversation(
+                conversation_id,
+                principal.user_id,
+            )
+        except ConversationNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="conversation_not_found",
+                message="Conversation does not exist for this user.",
+            ) from None
+
+    @application.delete(
+        "/api/conversations/{conversation_id}",
+        status_code=204,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+        },
+        tags=["conversations"],
+        operation_id="deleteConversation",
+    )
+    async def delete_conversation(
+        conversation_id: uuid.UUID,
+        principal: Principal,
+    ) -> Response:
+        try:
+            runtime_repository.delete_conversation(
+                conversation_id,
+                principal.user_id,
+            )
+        except ConversationNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="conversation_not_found",
+                message="Conversation does not exist for this user.",
+            ) from None
+        return Response(status_code=204)
+
     @application.post(
         "/api/chat",
         response_class=StreamingResponse,
@@ -371,9 +426,24 @@ def create_app(
         def event_stream() -> Iterator[str]:
             reply_parts: list[str] = []
             try:
+                history = []
+                if payload.conversation_id is not None:
+                    conversation = runtime_repository.get_conversation(
+                        payload.conversation_id,
+                        principal.user_id,
+                    )
+                    history = select_recent_history(
+                        conversation.messages,
+                        max_characters=max(
+                            0,
+                            runtime_settings.max_context_characters
+                            - len(payload.message),
+                        ),
+                    )
                 for delta in runtime_provider.stream_reply(
                     payload.message,
                     payload.mode,
+                    history=history,
                 ):
                     reply_parts.append(delta)
                     yield _sse_event({"type": "delta", "delta": delta})
@@ -393,6 +463,10 @@ def create_app(
                     conversation_id=conversation_id,
                     provider=runtime_provider.name,
                     mode=payload.mode.value,
+                    history_message_count=len(history),
+                    history_character_count=sum(
+                        len(message.content) for message in history
+                    ),
                     token_usage=(
                         None if runtime_provider.billable_model_calls else 0
                     ),

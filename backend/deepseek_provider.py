@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .model_provider import ModelProviderError
-from .models import AgentMode
+from .models import AgentMode, ModelMessage
 
 
 CHAT_SYSTEM_PROMPT = (
@@ -68,7 +68,13 @@ class DeepSeekProvider:
         self.max_tokens = max_tokens
         self._opener = opener
 
-    def stream_reply(self, message: str, mode: AgentMode) -> Iterator[str]:
+    def stream_reply(
+        self,
+        message: str,
+        mode: AgentMode,
+        *,
+        history: Sequence[ModelMessage] = (),
+    ) -> Iterator[str]:
         normalized_mode = AgentMode(mode)
         thinking_enabled = normalized_mode == AgentMode.RESEARCH
         request_body = {
@@ -82,6 +88,13 @@ class DeepSeekProvider:
                         else CHAT_SYSTEM_PROMPT
                     ),
                 },
+                *[
+                    {
+                        "role": context_message.role.value,
+                        "content": context_message.content,
+                    }
+                    for context_message in history
+                ],
                 {"role": "user", "content": message},
             ],
             "thinking": {
@@ -105,7 +118,7 @@ class DeepSeekProvider:
                 "Accept": "text/event-stream",
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "mind-personal-agent/0.3",
+                "User-Agent": "mind-personal-agent/0.5",
             },
         )
 

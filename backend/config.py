@@ -40,6 +40,7 @@ class Settings:
         default_factory=lambda: DEFAULT_ALLOWED_ORIGINS
     )
     max_request_bytes: int = 64_000
+    max_context_characters: int = 64_000
     host: str = "127.0.0.1"
     port: int = 8000
     provider: str = "fake"
@@ -57,6 +58,8 @@ class Settings:
             raise ValueError(f"Unsupported MIND_ENV: {self.environment}")
         if self.max_request_bytes < 1:
             raise ValueError("MIND_MAX_REQUEST_BYTES must be positive.")
+        if self.max_context_characters < 1:
+            raise ValueError("MIND_MAX_CONTEXT_CHARACTERS must be positive.")
         if not 1 <= self.port <= 65_535:
             raise ValueError("MIND_API_PORT must be between 1 and 65535.")
         if self.provider not in {"fake", "deepseek"}:
@@ -110,6 +113,9 @@ class Settings:
             ),
             max_request_bytes=int(
                 os.environ.get("MIND_MAX_REQUEST_BYTES", "64000")
+            ),
+            max_context_characters=int(
+                os.environ.get("MIND_MAX_CONTEXT_CHARACTERS", "64000")
             ),
             host=os.environ.get("MIND_API_HOST", "127.0.0.1"),
             port=int(os.environ.get("MIND_API_PORT", "8000")),

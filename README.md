@@ -13,6 +13,10 @@ environment-only credentials.
 - FastAPI streaming API using Server-Sent Events
 - Deterministic Fake ModelProvider with no external model calls
 - Opt-in DeepSeek V4 streaming provider with explicit billing status
+- Bounded multi-turn model context from persisted conversation history
+- Searchable, time-grouped conversation history with no display cap
+- Reopenable conversations after a page reload
+- Confirmed, tenant-scoped deletion of conversation history
 - Local bearer-token authentication boundary
 - Typed Pydantic API and domain models
 - Replaceable ModelProvider and ConversationRepository interfaces
@@ -93,7 +97,7 @@ Then open <http://127.0.0.1:8000/docs>.
 
 1. Local React → Python → Fake Agent streaming slice — complete
 2. FastAPI, typed kernel boundaries, OpenAPI, and container — complete
-3. DeepSeek streaming provider — complete
+3. DeepSeek streaming provider and multi-turn conversations — complete
 4. Firebase Authentication and managed deployment
 5. File and voice inputs
 6. Checkpointed Deep Research workflow

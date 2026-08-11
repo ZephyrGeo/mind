@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
-from .models import AgentMode
+from .models import AgentMode, ModelMessage
 
 
 class FakeAgentProvider:
@@ -49,7 +49,10 @@ class FakeAgentProvider:
         self,
         message: str,
         mode: AgentMode | str = AgentMode.CHAT,
+        *,
+        history: Sequence[ModelMessage] = (),
     ) -> Iterator[str]:
+        del history
         reply = self.create_reply(message, mode)
         for token in re.findall(r"\S+\s*|\n", reply):
             if self.delay_seconds:

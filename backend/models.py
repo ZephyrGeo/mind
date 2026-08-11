@@ -66,6 +66,20 @@ class Message(StrictModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ModelMessage(StrictModel):
+    """Minimal, provider-safe message included in model context."""
+
+    role: MessageRole
+    content: str = Field(min_length=1)
+
+    @field_validator("role")
+    @classmethod
+    def role_must_be_conversational(cls, value: MessageRole) -> MessageRole:
+        if value not in {MessageRole.USER, MessageRole.ASSISTANT}:
+            raise ValueError("Model history accepts only user and assistant roles.")
+        return value
+
+
 class Conversation(StrictModel):
     id: UUID = Field(default_factory=uuid4)
     user_id: str

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import AgentMode, ConversationSummary
+from .models import AgentMode, Conversation, ConversationSummary
 
 
 LOCAL_USER_ID = "local-developer"
@@ -44,6 +44,44 @@ class JsonConversationRepository:
             temporary_path = Path(handle.name)
         os.replace(temporary_path, self.file_path)
 
+    @staticmethod
+    def _to_conversation_model(
+        conversation: dict[str, Any],
+    ) -> Conversation:
+        """Normalize milestone-one records without mutating persisted content."""
+
+        conversation_id = str(conversation["id"])
+        fallback_created_at = conversation.get(
+            "created_at",
+            conversation.get("updated_at"),
+        )
+        normalized_messages = []
+        for index, message in enumerate(conversation.get("messages", [])):
+            normalized_message = dict(message)
+            normalized_message.setdefault(
+                "id",
+                str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"mind:{conversation_id}:message:{index}",
+                    )
+                ),
+            )
+            normalized_message.setdefault(
+                "conversation_id",
+                conversation_id,
+            )
+            normalized_message.setdefault("created_at", fallback_created_at)
+            normalized_messages.append(normalized_message)
+
+        normalized_conversation = {
+            **conversation,
+            "user_id": conversation.get("user_id") or LOCAL_USER_ID,
+            "mode": conversation.get("mode") or AgentMode.CHAT.value,
+            "messages": normalized_messages,
+        }
+        return Conversation.model_validate(normalized_conversation)
+
     def list_conversations(
         self,
         user_id: str = LOCAL_USER_ID,
@@ -68,6 +106,53 @@ class JsonConversationRepository:
                 )
                 for conversation in ordered
             ]
+
+    def get_conversation(
+        self,
+        conversation_id: uuid.UUID | str,
+        user_id: str = LOCAL_USER_ID,
+    ) -> Conversation:
+        requested_id = str(conversation_id)
+        with self._lock:
+            conversation = next(
+                (
+                    item
+                    for item in self._read()["conversations"]
+                    if item["id"] == requested_id
+                    and item.get("user_id", LOCAL_USER_ID) == user_id
+                ),
+                None,
+            )
+            if conversation is None:
+                raise ConversationNotFoundError(
+                    "Conversation does not exist for this user."
+                )
+            return self._to_conversation_model(conversation)
+
+    def delete_conversation(
+        self,
+        conversation_id: uuid.UUID | str,
+        user_id: str = LOCAL_USER_ID,
+    ) -> None:
+        requested_id = str(conversation_id)
+        with self._lock:
+            payload = self._read()
+            conversations = payload["conversations"]
+            conversation_index = next(
+                (
+                    index
+                    for index, item in enumerate(conversations)
+                    if item["id"] == requested_id
+                    and item.get("user_id", LOCAL_USER_ID) == user_id
+                ),
+                None,
+            )
+            if conversation_index is None:
+                raise ConversationNotFoundError(
+                    "Conversation does not exist for this user."
+                )
+            conversations.pop(conversation_index)
+            self._write(payload)
 
     def append_exchange(
         self,

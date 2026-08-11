@@ -15,6 +15,8 @@ Interactive documentation is available while the API is running:
 |---|---|---|---|
 | `GET` | `/api/health` | Public | Runtime, environment, provider, and billing status |
 | `GET` | `/api/conversations` | Local bearer token | Conversation summaries for the current user |
+| `GET` | `/api/conversations/{conversation_id}` | Local bearer token | Full tenant-scoped conversation for reopening and context |
+| `DELETE` | `/api/conversations/{conversation_id}` | Local bearer token | Permanently delete one owned conversation; returns 204 |
 | `POST` | `/api/chat` | Local bearer token | Stream an assistant response using Server-Sent Events |
 
 The current token is only a local development boundary. It is not production
@@ -89,15 +91,28 @@ lets the UI display this distinction before a message is sent.
 
 Chat mode disables DeepSeek thinking for lower latency. Research mode enables
 thinking but streams only final answer content; reasoning content is not exposed
-or persisted. The current request contains one user turn and a system prompt;
-multi-turn model context will be added when repository reads are introduced.
+or persisted. For an existing conversation, Mind reads complete persisted turns,
+keeps the newest turns that fit `MIND_MAX_CONTEXT_CHARACTERS`, and sends them in
+user/assistant order before the new user message. The limit includes the new
+message and prevents history from growing model cost without bound.
 
 The wire format and current model IDs follow the
 [official DeepSeek Chat Completions documentation](https://api-docs.deepseek.com/api/create-chat-completion).
 
 `ConversationRepository` owns tenant-scoped conversation reads and atomic
 exchange writes. `JsonConversationRepository` is the current ignored local
-implementation. Firestore can replace it without changing route handlers.
+implementation. The detail endpoint and model-context lookup return the same 404
+for missing and cross-tenant IDs. Firestore can replace the repository without
+changing route handlers.
+
+Milestone-one local JSON records are normalized in memory when read, so older
+conversations that predate typed message IDs and tenant fields remain openable.
+The compatibility read does not rewrite the local data file.
+
+Deletion is permanent and atomically rewrites the local repository only after
+ownership is verified. Missing and cross-tenant IDs both return
+`conversation_not_found`; the frontend requires an explicit confirmation before
+calling the endpoint.
 
 The shared Pydantic models define `User`, `Conversation`, `Message`,
 `Attachment`, `ResearchJob`, `Memory`, `Routine`, and `ToolCall` before their

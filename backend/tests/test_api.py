@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 import uuid
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request
@@ -18,6 +19,7 @@ from backend.app import (
     validate_chat_payload,
 )
 from backend.config import Settings
+from backend.conversation_context import select_recent_history
 from backend.deepseek_provider import DeepSeekProvider
 from backend.fake_agent import FakeAgentProvider
 from backend.model_provider import ModelProviderError
@@ -28,6 +30,8 @@ from backend.models import (
     Conversation,
     Memory,
     Message,
+    MessageRole,
+    ModelMessage,
     ResearchJob,
     Routine,
     ToolCall,
@@ -60,12 +64,37 @@ class FailingModelProvider:
     name = "deepseek"
     billable_model_calls = True
 
-    def stream_reply(self, _message: str, _mode: AgentMode):  # type: ignore[no-untyped-def]
+    def stream_reply(
+        self,
+        _message: str,
+        _mode: AgentMode,
+        *,
+        history: Sequence[ModelMessage] = (),
+    ) -> Iterator[str]:
+        del history
         raise ModelProviderError(
             "provider_rate_limited",
             "DeepSeek is receiving too many requests. Please retry shortly.",
             retryable=True,
         )
+
+
+class RecordingModelProvider:
+    name = "recording"
+    billable_model_calls = False
+
+    def __init__(self) -> None:
+        self.history_calls: list[list[ModelMessage]] = []
+
+    def stream_reply(
+        self,
+        message: str,
+        _mode: AgentMode,
+        *,
+        history: Sequence[ModelMessage] = (),
+    ) -> Iterator[str]:
+        self.history_calls.append(list(history))
+        yield f"Reply to {message}"
 
 
 def parse_sse(body: str) -> list[dict[str, object]]:
@@ -200,6 +229,109 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertEqual(str(summaries[0].id), events[-1]["conversation_id"])
         self.assertEqual(summaries[0].message_count, 2)
 
+        detail = self.client.get(
+            f"/api/conversations/{events[-1]['conversation_id']}",
+            headers=self.auth_headers,
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["id"], events[-1]["conversation_id"])
+        self.assertEqual(
+            [message["role"] for message in detail.json()["messages"]],
+            ["user", "assistant"],
+        )
+
+    def test_second_turn_receives_persisted_history(self) -> None:
+        provider = RecordingModelProvider()
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                repository=self.repository,
+                provider=provider,
+            )
+        )
+        self.addCleanup(client.close)
+
+        first_response = client.post(
+            "/api/chat",
+            headers=self.auth_headers,
+            json={"message": "Remember the code word lantern."},
+        )
+        first_events = parse_sse(first_response.text)
+        second_response = client.post(
+            "/api/chat",
+            headers=self.auth_headers,
+            json={
+                "conversation_id": first_events[-1]["conversation_id"],
+                "message": "What was the code word?",
+            },
+        )
+
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(provider.history_calls[0], [])
+        self.assertEqual(
+            [message.model_dump(mode="json") for message in provider.history_calls[1]],
+            [
+                {
+                    "role": "user",
+                    "content": "Remember the code word lantern.",
+                },
+                {
+                    "role": "assistant",
+                    "content": "Reply to Remember the code word lantern.",
+                },
+            ],
+        )
+        detail = self.repository.get_conversation(
+            first_events[-1]["conversation_id"],
+            "local-developer",
+        )
+        self.assertEqual(len(detail.messages), 4)
+
+    def test_delete_conversation_removes_only_the_owned_record(self) -> None:
+        response = self.client.post(
+            "/api/chat",
+            headers=self.auth_headers,
+            json={"message": "Temporary conversation."},
+        )
+        conversation_id = parse_sse(response.text)[-1]["conversation_id"]
+        other_conversation_id = self.repository.append_exchange(
+            None,
+            "Private to another user.",
+            "Must remain intact.",
+            AgentMode.CHAT,
+            user_id="other-user",
+        )
+
+        rejected = self.client.delete(
+            f"/api/conversations/{other_conversation_id}",
+            headers=self.auth_headers,
+        )
+        deleted = self.client.delete(
+            f"/api/conversations/{conversation_id}",
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(rejected.status_code, 404)
+        self.assertEqual(
+            rejected.json()["error"]["code"],
+            "conversation_not_found",
+        )
+        self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(deleted.content, b"")
+        self.assertEqual(
+            self.repository.list_conversations("local-developer"),
+            [],
+        )
+        self.assertEqual(
+            len(self.repository.list_conversations("other-user")),
+            1,
+        )
+        detail = self.client.get(
+            f"/api/conversations/{conversation_id}",
+            headers=self.auth_headers,
+        )
+        self.assertEqual(detail.status_code, 404)
+
     def test_unknown_conversation_is_not_silently_recreated(self) -> None:
         response = self.client.post(
             "/api/chat",
@@ -218,6 +350,16 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertEqual(
             self.repository.list_conversations("local-developer"),
             [],
+        )
+
+        detail = self.client.get(
+            f"/api/conversations/{uuid.uuid4()}",
+            headers=self.auth_headers,
+        )
+        self.assertEqual(detail.status_code, 404)
+        self.assertEqual(
+            detail.json()["error"]["code"],
+            "conversation_not_found",
         )
 
     def test_provider_failures_are_safe_retryable_sse_events(self) -> None:
@@ -310,6 +452,20 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertNotIn("Access-Control-Allow-Origin", rejected.headers)
         uuid.UUID(rejected.headers["X-Request-ID"])
 
+        delete_preflight = self.client.options(
+            f"/api/conversations/{uuid.uuid4()}",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "DELETE",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        self.assertEqual(delete_preflight.status_code, 200)
+        self.assertIn(
+            "DELETE",
+            delete_preflight.headers["Access-Control-Allow-Methods"],
+        )
+
     def test_not_found_uses_the_standard_error_envelope(self) -> None:
         response = self.client.get("/api/does-not-exist")
 
@@ -328,6 +484,14 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertEqual(schema["info"]["title"], "Mind Personal Agent API")
         self.assertIn("/api/health", schema["paths"])
         self.assertIn("/api/conversations", schema["paths"])
+        self.assertIn(
+            "/api/conversations/{conversation_id}",
+            schema["paths"],
+        )
+        self.assertIn(
+            "delete",
+            schema["paths"]["/api/conversations/{conversation_id}"],
+        )
         self.assertIn("/api/chat", schema["paths"])
         self.assertIn("ChatRequest", schema["components"]["schemas"])
         self.assertIn("ErrorResponse", schema["components"]["schemas"])
@@ -386,6 +550,14 @@ class MindDomainAndRepositoryTest(unittest.TestCase):
             self.assertEqual(str(summaries[0].id), conversation_id)
             self.assertEqual(summaries[0].message_count, 4)
             self.assertEqual(repository.list_conversations("user-b"), [])
+            conversation = repository.get_conversation(
+                conversation_id,
+                "user-a",
+            )
+            self.assertEqual(len(conversation.messages), 4)
+            self.assertEqual(conversation.messages[0].role, MessageRole.USER)
+            with self.assertRaises(ConversationNotFoundError):
+                repository.get_conversation(conversation_id, "user-b")
             with self.assertRaises(ConversationNotFoundError):
                 repository.append_exchange(
                     conversation_id,
@@ -394,7 +566,103 @@ class MindDomainAndRepositoryTest(unittest.TestCase):
                     AgentMode.CHAT,
                     user_id="user-b",
                 )
+            repository.delete_conversation(conversation_id, "user-a")
+            self.assertEqual(repository.list_conversations("user-a"), [])
+            with self.assertRaises(ConversationNotFoundError):
+                repository.delete_conversation(conversation_id, "user-a")
             self.assertTrue(data_path.exists())
+
+    def test_repository_reads_legacy_conversations_without_rewriting_them(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = Path(directory) / "conversations.json"
+            conversation_id = str(uuid.uuid4())
+            timestamp = "2026-01-01T00:00:00+00:00"
+            legacy_payload = {
+                "conversations": [
+                    {
+                        "id": conversation_id,
+                        "title": "Legacy conversation",
+                        "mode": "chat",
+                        "created_at": timestamp,
+                        "updated_at": timestamp,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "Legacy question",
+                                "created_at": timestamp,
+                            },
+                            {
+                                "role": "assistant",
+                                "content": "Legacy answer",
+                                "created_at": timestamp,
+                            },
+                        ],
+                    }
+                ]
+            }
+            original_json = json.dumps(legacy_payload, ensure_ascii=False)
+            data_path.write_text(original_json, encoding="utf-8")
+            repository = JsonConversationRepository(data_path)
+
+            first_read = repository.get_conversation(
+                conversation_id,
+                "local-developer",
+            )
+            second_read = repository.get_conversation(
+                conversation_id,
+                "local-developer",
+            )
+
+            self.assertEqual(first_read.user_id, "local-developer")
+            self.assertEqual(len(first_read.messages), 2)
+            self.assertEqual(
+                first_read.messages[0].conversation_id,
+                first_read.id,
+            )
+            self.assertEqual(
+                first_read.messages[0].id,
+                second_read.messages[0].id,
+            )
+            self.assertEqual(
+                data_path.read_text(encoding="utf-8"),
+                original_json,
+            )
+
+    def test_context_selection_keeps_only_recent_complete_turns(self) -> None:
+        conversation_id = uuid.uuid4()
+        messages = [
+            Message(
+                conversation_id=conversation_id,
+                role=MessageRole.USER,
+                content="old question",
+            ),
+            Message(
+                conversation_id=conversation_id,
+                role=MessageRole.ASSISTANT,
+                content="old answer",
+            ),
+            Message(
+                conversation_id=conversation_id,
+                role=MessageRole.USER,
+                content="new question",
+            ),
+            Message(
+                conversation_id=conversation_id,
+                role=MessageRole.ASSISTANT,
+                content="new answer",
+            ),
+        ]
+
+        history = select_recent_history(
+            messages,
+            max_characters=len("new questionnew answer"),
+        )
+
+        self.assertEqual(
+            [message.content for message in history],
+            ["new question", "new answer"],
+        )
+        self.assertEqual(select_recent_history(messages, max_characters=1), [])
 
     def test_all_phase_one_domain_models_are_defined(self) -> None:
         model_names = {
@@ -430,6 +698,12 @@ class MindDomainAndRepositoryTest(unittest.TestCase):
             "cannot be used outside development or test",
         ):
             Settings(environment="production")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "MIND_MAX_CONTEXT_CHARACTERS",
+        ):
+            Settings(max_context_characters=0)
 
 
 class DeepSeekProviderTest(unittest.TestCase):
@@ -475,6 +749,46 @@ class DeepSeekProviderTest(unittest.TestCase):
         self.assertEqual(body["thinking"], {"type": "disabled"})
         self.assertTrue(body["stream"])
         self.assertEqual(body["stream_options"], {"include_usage": True})
+
+    def test_sends_history_before_the_new_user_message(self) -> None:
+        captured_body: dict[str, object] = {}
+
+        def opener(request: Request, *, timeout: float) -> StubStreamingResponse:
+            del timeout
+            captured_body.update(json.loads(request.data.decode("utf-8")))
+            return StubStreamingResponse(
+                [
+                    b'data: {"choices":[{"delta":{"content":"Lantern"}}]}\n',
+                    b"data: [DONE]\n",
+                ]
+            )
+
+        provider = DeepSeekProvider(api_key="test-key", opener=opener)
+        history = [
+            ModelMessage(role=MessageRole.USER, content="Remember lantern."),
+            ModelMessage(role=MessageRole.ASSISTANT, content="I will remember it."),
+        ]
+
+        result = "".join(
+            provider.stream_reply(
+                "What was it?",
+                AgentMode.CHAT,
+                history=history,
+            )
+        )
+
+        self.assertEqual(result, "Lantern")
+        messages = captured_body["messages"]
+        self.assertIsInstance(messages, list)
+        assert isinstance(messages, list)
+        self.assertEqual(
+            messages[1:],
+            [
+                {"role": "user", "content": "Remember lantern."},
+                {"role": "assistant", "content": "I will remember it."},
+                {"role": "user", "content": "What was it?"},
+            ],
+        )
 
     def test_research_mode_enables_thinking(self) -> None:
         captured_body: dict[str, object] = {}

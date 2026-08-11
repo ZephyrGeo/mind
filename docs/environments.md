@@ -37,6 +37,7 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_API_PORT` | `8000` | API port; the container uses `8080` |
 | `MIND_ALLOWED_ORIGINS` | Both local frontend origins | Comma-separated exact CORS origins |
 | `MIND_MAX_REQUEST_BYTES` | `64000` | Maximum accepted HTTP request body |
+| `MIND_MAX_CONTEXT_CHARACTERS` | `64000` | Total character budget for the new message plus recent complete conversation turns |
 | `MIND_MODEL_PROVIDER` | `fake` | `fake` or `deepseek`; DeepSeek is an explicit billable opt-in |
 | `DEEPSEEK_API_KEY` | unset | Required only when `MIND_MODEL_PROVIDER=deepseek`; secret environment value |
 | `MIND_DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | HTTPS API origin; credentials in URLs are rejected |

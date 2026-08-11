@@ -8,12 +8,31 @@ test("built page contains the Mind product shell", async () => {
     new URL("../dist/assets/app.js", import.meta.url),
     "utf8",
   );
+  const source = await readFile(
+    new URL("../frontend/app.js", import.meta.url),
+    "utf8",
+  );
 
   assert.match(html, /Mind — Personal AI workspace/);
+  assert.match(html, /@phosphor-icons\/web@2\.1\.2/);
   assert.match(bundle, /What should we make sense of/);
   assert.match(bundle, /Fake Provider · no model calls · no cloud cost/);
   assert.match(bundle, /DeepSeek Provider · model calls may incur cost/);
   assert.match(bundle, /\/api\/health/);
+  assert.match(bundle, /\/api\/conversations\/\$\{conversation\.id\}/);
+  assert.match(bundle, /The conversation could not be opened/);
+  assert.match(bundle, /Delete conversation/);
+  assert.match(bundle, /method:\s*"DELETE"/);
+  assert.match(bundle, /This cannot be undone/);
+  assert.match(bundle, /Search conversations/);
+  assert.match(bundle, /Previous 7 Days/);
+  assert.match(bundle, /Previous 30 Days/);
+  assert.match(bundle, /composer-mode-switch/);
+  assert.match(bundle, /conversation-selector/);
+  assert.match(bundle, /name:\s*"star-four"/);
+  assert.match(bundle, /Collapse sidebar/);
+  assert.match(bundle, /sidebarCollapsed/);
+  assert.doesNotMatch(source, /conversations\.slice\(0,\s*5\)/);
   assert.match(bundle, /Authorization/);
   assert.match(bundle, /text\/event-stream/);
 });
@@ -26,4 +45,9 @@ test("built stylesheet includes responsive and reduced-motion behavior", async (
   assert.match(css, /@media \(max-width: 650px\)/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /\.sidebar-container\.open/);
+  assert.match(css, /\.conversation-group-label/);
+  assert.match(css, /\.empty-workspace/);
+  assert.match(css, /\.app-shell\.sidebar-collapsed/);
+  assert.match(css, /grid-template-columns:\s*300px minmax\(0, 1fr\)/);
+  assert.match(css, /overflow-y:\s*auto/);
 });
