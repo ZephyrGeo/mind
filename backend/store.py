@@ -219,6 +219,122 @@ class JsonConversationRepository:
             self._write(payload)
             return str(requested_id)
 
+    def append_user_message(
+        self,
+        conversation_id: uuid.UUID | str | None,
+        content: str,
+        mode: AgentMode | str,
+        *,
+        user_id: str = LOCAL_USER_ID,
+    ) -> str:
+        with self._lock:
+            payload = self._read()
+            conversations = payload["conversations"]
+            requested_id = str(conversation_id) if conversation_id else None
+            conversation = next(
+                (
+                    item
+                    for item in conversations
+                    if requested_id
+                    and item["id"] == requested_id
+                    and item.get("user_id", LOCAL_USER_ID) == user_id
+                ),
+                None,
+            )
+            if requested_id and conversation is None:
+                raise ConversationNotFoundError(
+                    "Conversation does not exist for this user."
+                )
+
+            now = datetime.now(timezone.utc).isoformat()
+            if conversation is None:
+                requested_id = str(uuid.uuid4())
+                conversation = {
+                    "id": requested_id,
+                    "user_id": user_id,
+                    "title": content.strip().replace("\n", " ")[:56]
+                    or "New research",
+                    "created_at": now,
+                    "updated_at": now,
+                    "mode": AgentMode(mode).value,
+                    "messages": [],
+                }
+                conversations.append(conversation)
+
+            conversation["messages"].append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "conversation_id": requested_id,
+                    "role": "user",
+                    "content": content,
+                    "created_at": now,
+                }
+            )
+            conversation["updated_at"] = now
+            self._write(payload)
+            return str(requested_id)
+
+    def append_assistant_message(
+        self,
+        conversation_id: uuid.UUID | str,
+        content: str,
+        *,
+        user_id: str = LOCAL_USER_ID,
+        research_job_id: uuid.UUID | str | None = None,
+    ) -> str:
+        requested_id = str(conversation_id)
+        requested_job_id = (
+            str(research_job_id) if research_job_id is not None else None
+        )
+        with self._lock:
+            payload = self._read()
+            conversation = next(
+                (
+                    item
+                    for item in payload["conversations"]
+                    if item["id"] == requested_id
+                    and item.get("user_id", LOCAL_USER_ID) == user_id
+                ),
+                None,
+            )
+            if conversation is None:
+                raise ConversationNotFoundError(
+                    "Conversation does not exist for this user."
+                )
+            if requested_job_id is not None:
+                existing = next(
+                    (
+                        message
+                        for message in conversation["messages"]
+                        if message.get("research_job_id") == requested_job_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if content and existing.get("content") != content:
+                        existing["content"] = content
+                        conversation["updated_at"] = (
+                            datetime.now(timezone.utc).isoformat()
+                        )
+                        self._write(payload)
+                    return str(existing["id"])
+
+            now = datetime.now(timezone.utc).isoformat()
+            message_id = str(uuid.uuid4())
+            message = {
+                "id": message_id,
+                "conversation_id": requested_id,
+                "role": "assistant",
+                "content": content,
+                "created_at": now,
+            }
+            if requested_job_id is not None:
+                message["research_job_id"] = requested_job_id
+            conversation["messages"].append(message)
+            conversation["updated_at"] = now
+            self._write(payload)
+            return message_id
+
 
 # Preserve the milestone-one import while callers migrate to the repository name.
 ConversationStore = JsonConversationRepository

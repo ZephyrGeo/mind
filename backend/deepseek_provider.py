@@ -118,7 +118,7 @@ class DeepSeekProvider:
                 "Accept": "text/event-stream",
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "mind-personal-agent/0.5",
+                "User-Agent": "mind-personal-agent/0.6",
             },
         )
 

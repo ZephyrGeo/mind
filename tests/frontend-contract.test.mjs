@@ -18,6 +18,7 @@ test("built page contains the Mind product shell", async () => {
   assert.match(bundle, /What should we make sense of/);
   assert.match(bundle, /Fake Provider · no model calls · no cloud cost/);
   assert.match(bundle, /DeepSeek Provider · model calls may incur cost/);
+  assert.match(bundle, /OpenAI Research Provider/);
   assert.match(bundle, /\/api\/health/);
   assert.match(bundle, /\/api\/conversations\/\$\{conversation\.id\}/);
   assert.match(bundle, /The conversation could not be opened/);
@@ -35,6 +36,18 @@ test("built page contains the Mind product shell", async () => {
   assert.doesNotMatch(source, /conversations\.slice\(0,\s*5\)/);
   assert.match(bundle, /Authorization/);
   assert.match(bundle, /text\/event-stream/);
+  assert.match(bundle, /\/api\/research/);
+  assert.match(bundle, /Resume OpenAI research/);
+  assert.match(bundle, /Restart as a new OpenAI task/);
+  assert.match(bundle, /research_started/);
+  assert.match(bundle, /Research complete/);
+  assert.match(bundle, /OpenAI ·/);
+  assert.match(bundle, /MarkdownContent/);
+  assert.match(bundle, /message-link/);
+  assert.doesNotMatch(source, /dangerouslySetInnerHTML/);
+  assert.match(bundle, /target:\s*"_blank"/);
+  assert.match(bundle, /\/cancel/);
+  assert.match(bundle, /sources collected/);
 });
 
 test("built stylesheet includes responsive and reduced-motion behavior", async () => {
@@ -50,4 +63,9 @@ test("built stylesheet includes responsive and reduced-motion behavior", async (
   assert.match(css, /\.app-shell\.sidebar-collapsed/);
   assert.match(css, /grid-template-columns:\s*300px minmax\(0, 1fr\)/);
   assert.match(css, /overflow-y:\s*auto/);
+  assert.match(css, /\.research-progress/);
+  assert.match(css, /\.research-source-list/);
+  assert.match(css, /\.research-resume/);
+  assert.match(css, /\.markdown-content/);
+  assert.match(css, /\.message-link/);
 });

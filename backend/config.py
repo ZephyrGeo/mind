@@ -10,6 +10,9 @@ from urllib.parse import urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_PATH = PROJECT_ROOT / "work" / "local-data" / "conversations.json"
+DEFAULT_RESEARCH_DATA_PATH = (
+    PROJECT_ROOT / "work" / "local-data" / "research-jobs.json"
+)
 DEFAULT_LOCAL_TOKEN = "local-demo-token"
 DEFAULT_ALLOWED_ORIGINS = (
     "http://127.0.0.1:3000",
@@ -17,6 +20,8 @@ DEFAULT_ALLOWED_ORIGINS = (
 )
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_RESEARCH_MODEL = "gpt-5.6-terra"
 
 
 def _csv(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -36,6 +41,7 @@ class Settings:
     environment: str = "development"
     local_token: str = DEFAULT_LOCAL_TOKEN
     data_path: Path = DEFAULT_DATA_PATH
+    research_data_path: Path = DEFAULT_RESEARCH_DATA_PATH
     allowed_origins: tuple[str, ...] = field(
         default_factory=lambda: DEFAULT_ALLOWED_ORIGINS
     )
@@ -49,6 +55,14 @@ class Settings:
     deepseek_model: str = DEFAULT_DEEPSEEK_MODEL
     deepseek_timeout_seconds: float = 120.0
     deepseek_max_tokens: int = 2_048
+    research_provider: str = "openai"
+    openai_api_key: str | None = None
+    openai_base_url: str = DEFAULT_OPENAI_BASE_URL
+    research_model: str = DEFAULT_RESEARCH_MODEL
+    research_reasoning_effort: str = "high"
+    research_max_tool_calls: int = 12
+    research_poll_interval_seconds: float = 2.0
+    openai_timeout_seconds: float = 120.0
     log_level: str = "INFO"
     quiet: bool = False
 
@@ -91,6 +105,42 @@ class Settings:
             raise ValueError("MIND_DEEPSEEK_TIMEOUT_SECONDS must be positive.")
         if self.deepseek_max_tokens < 1:
             raise ValueError("MIND_DEEPSEEK_MAX_TOKENS must be positive.")
+        if self.research_provider != "openai":
+            raise ValueError("MIND_RESEARCH_PROVIDER must be openai.")
+        parsed_openai_url = urlsplit(self.openai_base_url)
+        if (
+            parsed_openai_url.scheme != "https"
+            or not parsed_openai_url.hostname
+            or parsed_openai_url.username
+            or parsed_openai_url.password
+            or parsed_openai_url.query
+            or parsed_openai_url.fragment
+        ):
+            raise ValueError(
+                "MIND_OPENAI_BASE_URL must be an HTTPS origin without "
+                "credentials, query parameters, or fragments."
+            )
+        if not self.research_model or any(
+            character.isspace() for character in self.research_model
+        ):
+            raise ValueError("MIND_RESEARCH_MODEL must be a non-empty model ID.")
+        if self.research_reasoning_effort not in {
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }:
+            raise ValueError("MIND_RESEARCH_REASONING_EFFORT is unsupported.")
+        if self.research_max_tool_calls < 1:
+            raise ValueError("MIND_RESEARCH_MAX_TOOL_CALLS must be positive.")
+        if self.research_poll_interval_seconds <= 0:
+            raise ValueError(
+                "MIND_RESEARCH_POLL_INTERVAL_SECONDS must be positive."
+            )
+        if self.openai_timeout_seconds <= 0:
+            raise ValueError("MIND_OPENAI_TIMEOUT_SECONDS must be positive.")
         if environment in {"staging", "production"}:
             if self.local_token == DEFAULT_LOCAL_TOKEN:
                 raise ValueError(
@@ -98,6 +148,10 @@ class Settings:
                 )
             if not self.allowed_origins:
                 raise ValueError("At least one CORS origin is required.")
+            if not (self.openai_api_key and self.openai_api_key.strip()):
+                raise ValueError(
+                    "OPENAI_API_KEY is required outside development or test."
+                )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -106,6 +160,12 @@ class Settings:
             local_token=os.environ.get("MIND_LOCAL_TOKEN", DEFAULT_LOCAL_TOKEN),
             data_path=Path(
                 os.environ.get("MIND_DATA_PATH", str(DEFAULT_DATA_PATH))
+            ),
+            research_data_path=Path(
+                os.environ.get(
+                    "MIND_RESEARCH_DATA_PATH",
+                    str(DEFAULT_RESEARCH_DATA_PATH),
+                )
             ),
             allowed_origins=_csv(
                 os.environ.get("MIND_ALLOWED_ORIGINS"),
@@ -134,6 +194,32 @@ class Settings:
             ),
             deepseek_max_tokens=int(
                 os.environ.get("MIND_DEEPSEEK_MAX_TOKENS", "2048")
+            ),
+            research_provider=os.environ.get(
+                "MIND_RESEARCH_PROVIDER",
+                "openai",
+            ),
+            openai_api_key=os.environ.get("OPENAI_API_KEY"),
+            openai_base_url=os.environ.get(
+                "MIND_OPENAI_BASE_URL",
+                DEFAULT_OPENAI_BASE_URL,
+            ),
+            research_model=os.environ.get(
+                "MIND_RESEARCH_MODEL",
+                DEFAULT_RESEARCH_MODEL,
+            ),
+            research_reasoning_effort=os.environ.get(
+                "MIND_RESEARCH_REASONING_EFFORT",
+                "high",
+            ),
+            research_max_tool_calls=int(
+                os.environ.get("MIND_RESEARCH_MAX_TOOL_CALLS", "12")
+            ),
+            research_poll_interval_seconds=float(
+                os.environ.get("MIND_RESEARCH_POLL_INTERVAL_SECONDS", "2")
+            ),
+            openai_timeout_seconds=float(
+                os.environ.get("MIND_OPENAI_TIMEOUT_SECONDS", "120")
             ),
             log_level=os.environ.get("MIND_LOG_LEVEL", "INFO"),
             quiet=os.environ.get("MIND_QUIET") == "1",

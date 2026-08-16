@@ -22,6 +22,11 @@ test("local development loads an optional ignored environment file", async () =>
   assert.match(gitignore, /^\.env\.\*$/m);
   assert.match(example, /^DEEPSEEK_API_KEY=$/m);
   assert.doesNotMatch(example, /^DEEPSEEK_API_KEY=.+$/m);
+  assert.match(example, /^OPENAI_API_KEY=$/m);
+  assert.doesNotMatch(example, /^OPENAI_API_KEY=.+$/m);
+  assert.match(example, /^MIND_RESEARCH_PROVIDER=openai$/m);
+  assert.match(example, /^MIND_RESEARCH_MODEL=gpt-5\.6-terra$/m);
+  assert.doesNotMatch(example, /TAVILY_API_KEY|MIND_SEARCH_PROVIDER/);
 });
 
 test("test commands do not load the local billable provider configuration", async () => {

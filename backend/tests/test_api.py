@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request
@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from backend.app import (
     create_app,
     create_model_provider,
+    create_research_provider,
     is_authorized_header,
     validate_chat_payload,
 )
@@ -33,9 +34,20 @@ from backend.models import (
     MessageRole,
     ModelMessage,
     ResearchJob,
+    ResearchRequest,
+    ResearchStatus,
     Routine,
     ToolCall,
     User,
+)
+from backend.openai_research_provider import OpenAIResearchProvider
+from backend.research_provider import (
+    ResearchProviderError,
+    ResearchProviderResult,
+)
+from backend.research_store import (
+    JsonResearchRepository,
+    ResearchJobNotFoundError,
 )
 from backend.store import (
     ConversationNotFoundError,
@@ -58,6 +70,130 @@ class StubStreamingResponse:
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         return iter(self.lines)
+
+
+class StubJsonResponse:
+    def __init__(self, payload: object) -> None:
+        self.encoded = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self) -> "StubJsonResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self, _limit: int) -> bytes:
+        return self.encoded
+
+
+def completed_research_response(response_id: str) -> dict[str, object]:
+    text = "## Research summary\n\nEvidence from Example source supports the result."
+    cited_text = "Example source"
+    start_index = text.index(cited_text)
+    return {
+        "id": response_id,
+        "status": "completed",
+        "output": [
+            {
+                "type": "web_search_call",
+                "id": "ws_test",
+                "status": "completed",
+                "action": {
+                    "type": "search",
+                    "sources": [
+                        {
+                            "type": "url",
+                            "url": "https://example.com/primary",
+                            "title": "Example source",
+                        },
+                        {
+                            "type": "url",
+                            "url": "https://example.com/complete-list-only",
+                            "title": "Complete source list item",
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text,
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url": "https://example.com/primary",
+                                "title": "Example source",
+                                "start_index": start_index,
+                                "end_index": start_index + len(cited_text),
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+
+
+class MockResearchProvider:
+    """Test-only provider; production selection remains OpenAI-only."""
+
+    name = "openai"
+    billable_calls = False
+    configured = True
+
+    def __init__(self) -> None:
+        self.parser = OpenAIResearchProvider(api_key="test-openai-key")
+        self.start_calls: list[str] = []
+        self.retrieve_calls: list[str] = []
+        self.cancel_calls: list[str] = []
+        self.responses: dict[str, list[dict[str, object]]] = {}
+        self.fail_retrieve_once = False
+
+    def start(self, query: str) -> Mapping[str, object]:
+        self.start_calls.append(query)
+        response_id = f"resp_mock_{len(self.start_calls)}"
+        self.responses[response_id] = [
+            {"id": response_id, "status": "in_progress", "output": []},
+            completed_research_response(response_id),
+        ]
+        return {"id": response_id, "status": "queued", "output": []}
+
+    def retrieve(self, response_id: str) -> Mapping[str, object]:
+        self.retrieve_calls.append(response_id)
+        if self.fail_retrieve_once:
+            self.fail_retrieve_once = False
+            raise ResearchProviderError(
+                "research_provider_unavailable",
+                "OpenAI Research is temporarily unavailable. Please try again.",
+                retryable=True,
+            )
+        queue = self.responses[response_id]
+        if len(queue) > 1:
+            return queue.pop(0)
+        return queue[0]
+
+    def cancel(self, response_id: str) -> Mapping[str, object]:
+        self.cancel_calls.append(response_id)
+        response = {"id": response_id, "status": "cancelled", "output": []}
+        self.responses[response_id] = [response]
+        return response
+
+    def parse_result(
+        self,
+        response: Mapping[str, object],
+    ) -> ResearchProviderResult:
+        return self.parser.parse_result(response)
+
+    def register(
+        self,
+        response_id: str,
+        *responses: dict[str, object],
+    ) -> None:
+        self.responses[response_id] = list(responses)
 
 
 class FailingModelProvider:
@@ -116,12 +252,19 @@ class MindFastAPIContractTest(unittest.TestCase):
         data_path = (
             Path(self.temporary_directory.name) / "conversations.json"
         )
+        research_data_path = (
+            Path(self.temporary_directory.name) / "research-jobs.json"
+        )
         self.repository = JsonConversationRepository(data_path)
+        self.research_repository = JsonResearchRepository(research_data_path)
         self.provider = FakeAgentProvider(delay_seconds=0)
+        self.research_provider = MockResearchProvider()
         self.settings = Settings(
             environment="test",
             local_token=TEST_TOKEN,
             data_path=data_path,
+            research_data_path=research_data_path,
+            research_poll_interval_seconds=0.001,
             quiet=True,
         )
         self.client = TestClient(
@@ -129,6 +272,8 @@ class MindFastAPIContractTest(unittest.TestCase):
                 settings=self.settings,
                 repository=self.repository,
                 provider=self.provider,
+                research_repository=self.research_repository,
+                research_provider=self.research_provider,
             )
         )
         self.addCleanup(self.client.close)
@@ -150,6 +295,9 @@ class MindFastAPIContractTest(unittest.TestCase):
                 "environment": "test",
                 "provider": "fake",
                 "billable_model_calls": False,
+                "research_provider": "openai",
+                "billable_research_calls": False,
+                "research_mode": "live",
             },
         )
 
@@ -190,6 +338,8 @@ class MindFastAPIContractTest(unittest.TestCase):
             ChatRequest(message="   ")
         with self.assertRaises(ValidationError):
             ChatRequest(message="hello", mode="unsupported")
+        with self.assertRaises(ValidationError):
+            ResearchRequest(query="   ")
 
         response = self.client.post(
             "/api/chat",
@@ -239,6 +389,225 @@ class MindFastAPIContractTest(unittest.TestCase):
             [message["role"] for message in detail.json()["messages"]],
             ["user", "assistant"],
         )
+
+    def test_research_streams_checkpoints_sources_and_a_persisted_report(
+        self,
+    ) -> None:
+        response = self.client.post(
+            "/api/research",
+            headers={
+                **self.auth_headers,
+                "X-Request-ID": "research-contract-test",
+            },
+            json={"query": "How should a personal agent evaluate evidence?"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        events = parse_sse(response.text)
+        event_types = [event["type"] for event in events]
+        self.assertEqual(event_types[0], "research_started")
+        self.assertIn("source", event_types)
+        self.assertIn("delta", event_types)
+        self.assertEqual(event_types[-1], "done")
+        self.assertEqual(events[-1]["request_id"], "research-contract-test")
+        self.assertGreater(events[-1]["source_count"], 0)
+
+        job_id = events[0]["job_id"]
+        job_response = self.client.get(
+            f"/api/research/{job_id}",
+            headers=self.auth_headers,
+        )
+        self.assertEqual(job_response.status_code, 200)
+        job = job_response.json()
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["progress"], 1.0)
+        self.assertEqual(job["provider_response_id"], "resp_mock_1")
+        self.assertEqual(job["provider_status"], "completed")
+        self.assertEqual(len(job["checkpoint"]["sources"]), 2)
+        self.assertEqual(len(job["checkpoint"]["citations"]), 1)
+        self.assertIn("Research summary", job["checkpoint"]["report"])
+
+        conversation = self.repository.get_conversation(
+            events[-1]["conversation_id"],
+            "local-developer",
+        )
+        self.assertEqual(
+            [message.role for message in conversation.messages],
+            [MessageRole.USER, MessageRole.ASSISTANT],
+        )
+        self.assertEqual(
+            str(conversation.messages[-1].research_job_id),
+            job_id,
+        )
+
+    def test_failed_poll_resumes_the_same_openai_response_without_restarting(
+        self,
+    ) -> None:
+        self.research_provider.fail_retrieve_once = True
+
+        first = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Checkpointed research"},
+        )
+        first_events = parse_sse(first.text)
+        self.assertEqual(first_events[-1]["type"], "error")
+        self.assertEqual(
+            first_events[-1]["code"],
+            "research_provider_unavailable",
+        )
+        job_id = first_events[0]["job_id"]
+        failed = self.research_repository.get_job(job_id, "local-developer")
+        self.assertEqual(failed.status, ResearchStatus.FAILED)
+        self.assertEqual(failed.provider_response_id, "resp_mock_1")
+        self.assertEqual(failed.provider_status, "queued")
+        failed_conversation = self.repository.get_conversation(
+            failed.conversation_id,
+            "local-developer",
+        )
+        self.assertEqual(failed_conversation.messages[-1].content, "")
+        self.assertEqual(
+            str(failed_conversation.messages[-1].research_job_id),
+            job_id,
+        )
+        resumed = self.client.post(
+            f"/api/research/{job_id}/resume",
+            headers=self.auth_headers,
+        )
+        resumed_events = parse_sse(resumed.text)
+        self.assertEqual(resumed_events[-1]["type"], "done")
+        completed = self.research_repository.get_job(job_id, "local-developer")
+        self.assertEqual(completed.status, ResearchStatus.COMPLETED)
+        self.assertEqual(self.research_provider.start_calls, ["Checkpointed research"])
+        self.assertTrue(
+            all(
+                response_id == "resp_mock_1"
+                for response_id in self.research_provider.retrieve_calls
+            )
+        )
+
+    def test_research_jobs_are_tenant_scoped(self) -> None:
+        other_job = self.research_repository.create_job(
+            ResearchJob(
+                user_id="other-user",
+                conversation_id=uuid.uuid4(),
+                query="Private research",
+            )
+        )
+
+        response = self.client.get(
+            f"/api/research/{other_job.id}",
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "research_job_not_found",
+        )
+
+    def test_get_refreshes_by_response_id_and_does_not_duplicate_assistant(self) -> None:
+        conversation_id = self.repository.append_user_message(
+            None,
+            "Restore after browser disconnect",
+            AgentMode.RESEARCH,
+            user_id="local-developer",
+        )
+        job = self.research_repository.create_job(
+            ResearchJob(
+                user_id="local-developer",
+                conversation_id=uuid.UUID(conversation_id),
+                query="Restore after browser disconnect",
+                status=ResearchStatus.COLLECTING,
+                provider_response_id="resp_existing",
+                provider_status="in_progress",
+            )
+        )
+        self.repository.append_assistant_message(
+            conversation_id,
+            "",
+            user_id="local-developer",
+            research_job_id=job.id,
+        )
+        self.research_provider.register(
+            "resp_existing",
+            completed_research_response("resp_existing"),
+        )
+
+        first = self.client.get(
+            f"/api/research/{job.id}",
+            headers=self.auth_headers,
+        )
+        second = self.client.get(
+            f"/api/research/{job.id}",
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["status"], "completed")
+        self.assertEqual(second.json()["status"], "completed")
+        self.assertEqual(self.research_provider.start_calls, [])
+        self.assertEqual(self.research_provider.retrieve_calls, ["resp_existing"])
+        conversation = self.repository.get_conversation(
+            conversation_id,
+            "local-developer",
+        )
+        self.assertEqual(len(conversation.messages), 2)
+        self.assertIn("Research summary", conversation.messages[-1].content)
+
+    def test_cancel_calls_openai_and_resume_starts_a_new_response(self) -> None:
+        conversation_id = self.repository.append_user_message(
+            None,
+            "Research cancellation",
+            AgentMode.RESEARCH,
+            user_id="local-developer",
+        )
+        job = self.research_repository.create_job(
+            ResearchJob(
+                user_id="local-developer",
+                conversation_id=uuid.UUID(conversation_id),
+                query="Research cancellation",
+                status=ResearchStatus.COLLECTING,
+                provider_response_id="resp_cancelled",
+                provider_status="in_progress",
+            )
+        )
+        self.repository.append_assistant_message(
+            conversation_id,
+            "",
+            user_id="local-developer",
+            research_job_id=job.id,
+        )
+        self.research_provider.register(
+            "resp_cancelled",
+            {"id": "resp_cancelled", "status": "in_progress", "output": []},
+        )
+
+        cancelled_response = self.client.post(
+            f"/api/research/{job.id}/cancel",
+            headers=self.auth_headers,
+        )
+        self.assertEqual(cancelled_response.status_code, 200)
+        self.assertEqual(cancelled_response.json()["status"], "cancelled")
+        self.assertEqual(
+            self.research_provider.cancel_calls,
+            ["resp_cancelled"],
+        )
+
+        resumed_response = self.client.post(
+            f"/api/research/{job.id}/resume",
+            headers=self.auth_headers,
+        )
+        resumed_events = parse_sse(resumed_response.text)
+        self.assertEqual(resumed_events[-1]["type"], "done")
+        self.assertEqual(
+            self.research_repository.get_job(job.id, "local-developer").status,
+            ResearchStatus.COMPLETED,
+        )
+        restarted = self.research_repository.get_job(job.id, "local-developer")
+        self.assertEqual(restarted.previous_response_ids, ["resp_cancelled"])
+        self.assertNotEqual(restarted.provider_response_id, "resp_cancelled")
+        self.assertEqual(self.research_provider.start_calls, ["Research cancellation"])
 
     def test_second_turn_receives_persisted_history(self) -> None:
         provider = RecordingModelProvider()
@@ -301,6 +670,13 @@ class MindFastAPIContractTest(unittest.TestCase):
             AgentMode.CHAT,
             user_id="other-user",
         )
+        research_job = self.research_repository.create_job(
+            ResearchJob(
+                user_id="local-developer",
+                conversation_id=uuid.UUID(conversation_id),
+                query="Temporary research",
+            )
+        )
 
         rejected = self.client.delete(
             f"/api/conversations/{other_conversation_id}",
@@ -331,6 +707,11 @@ class MindFastAPIContractTest(unittest.TestCase):
             headers=self.auth_headers,
         )
         self.assertEqual(detail.status_code, 404)
+        with self.assertRaises(ResearchJobNotFoundError):
+            self.research_repository.get_job(
+                research_job.id,
+                "local-developer",
+            )
 
     def test_unknown_conversation_is_not_silently_recreated(self) -> None:
         response = self.client.post(
@@ -493,6 +874,10 @@ class MindFastAPIContractTest(unittest.TestCase):
             schema["paths"]["/api/conversations/{conversation_id}"],
         )
         self.assertIn("/api/chat", schema["paths"])
+        self.assertIn("/api/research", schema["paths"])
+        self.assertIn("/api/research/{job_id}", schema["paths"])
+        self.assertIn("ResearchRequest", schema["components"]["schemas"])
+        self.assertIn("ResearchJob", schema["components"]["schemas"])
         self.assertIn("ChatRequest", schema["components"]["schemas"])
         self.assertIn("ErrorResponse", schema["components"]["schemas"])
 
@@ -706,6 +1091,126 @@ class MindDomainAndRepositoryTest(unittest.TestCase):
             Settings(max_context_characters=0)
 
 
+class OpenAIResearchProviderTest(unittest.TestCase):
+    def test_start_uses_background_responses_web_search_and_bounded_tools(
+        self,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def opener(request: Request, *, timeout: float) -> StubJsonResponse:
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return StubJsonResponse(
+                {"id": "resp_test", "status": "queued", "output": []}
+            )
+
+        provider = OpenAIResearchProvider(
+            api_key="test-openai-key",
+            opener=opener,
+        )
+        result = provider.parse_result(provider.start("test query"))
+
+        self.assertEqual(result.response_id, "resp_test")
+        self.assertEqual(result.status, "queued")
+        self.assertEqual(captured["timeout"], 120.0)
+        request = captured["request"]
+        self.assertIsInstance(request, Request)
+        assert isinstance(request, Request)
+        self.assertEqual(request.full_url, "https://api.openai.com/v1/responses")
+        self.assertEqual(
+            request.get_header("Authorization"),
+            "Bearer test-openai-key",
+        )
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["model"], "gpt-5.6-terra")
+        self.assertTrue(body["background"])
+        self.assertTrue(body["store"])
+        self.assertEqual(body["tools"], [{"type": "web_search"}])
+        self.assertEqual(
+            body["include"],
+            ["web_search_call.action.sources"],
+        )
+        self.assertEqual(body["reasoning"], {"effort": "high"})
+        self.assertEqual(body["max_tool_calls"], 12)
+        self.assertIn("Do not manually repeat raw source URLs", body["input"])
+        self.assertIn("structured response metadata", body["input"])
+
+    def test_parse_result_keeps_output_citations_and_complete_sources(self) -> None:
+        provider = OpenAIResearchProvider(api_key="test-key")
+
+        result = provider.parse_result(completed_research_response("resp_done"))
+
+        self.assertEqual(result.status, "completed")
+        self.assertIn("Research summary", result.output_text)
+        self.assertEqual(len(result.citations), 1)
+        self.assertEqual(result.citations[0].title, "Example source")
+        self.assertEqual(
+            result.output_text[
+                result.citations[0].start_index : result.citations[0].end_index
+            ],
+            "Example source",
+        )
+        self.assertEqual(
+            [source.url for source in result.sources],
+            [
+                "https://example.com/primary",
+                "https://example.com/complete-list-only",
+            ],
+        )
+
+    def test_retrieve_and_cancel_use_the_saved_response_id(self) -> None:
+        requests: list[Request] = []
+
+        def opener(request: Request, *, timeout: float) -> StubJsonResponse:
+            del timeout
+            requests.append(request)
+            status = "cancelled" if request.full_url.endswith("/cancel") else "in_progress"
+            return StubJsonResponse(
+                {"id": "resp_saved", "status": status, "output": []}
+            )
+
+        provider = OpenAIResearchProvider(
+            api_key="test-key",
+            opener=opener,
+        )
+
+        provider.retrieve("resp_saved")
+        provider.cancel("resp_saved")
+
+        self.assertEqual(
+            [request.full_url for request in requests],
+            [
+                "https://api.openai.com/v1/responses/resp_saved",
+                "https://api.openai.com/v1/responses/resp_saved/cancel",
+            ],
+        )
+        self.assertEqual([request.method for request in requests], ["GET", "POST"])
+
+    def test_configuration_allows_only_openai_and_fails_closed_in_production(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "must be openai"):
+            Settings(research_provider="fake")
+        with self.assertRaisesRegex(ValueError, "OPENAI_API_KEY"):
+            Settings(
+                environment="production",
+                local_token="production-token",
+                allowed_origins=("https://mind.example",),
+            )
+        provider = create_research_provider(
+            Settings(openai_api_key="test-openai-key")
+        )
+        self.assertIsInstance(provider, OpenAIResearchProvider)
+        self.assertEqual(provider.name, "openai")
+        self.assertTrue(provider.billable_calls)
+
+        unconfigured = create_research_provider(Settings())
+        self.assertFalse(unconfigured.configured)
+        with self.assertRaises(ResearchProviderError) as context:
+            unconfigured.start("test")
+        self.assertEqual(context.exception.code, "research_not_configured")
+
+
 class DeepSeekProviderTest(unittest.TestCase):
     def test_streams_chat_completion_without_a_network_call(self) -> None:
         captured: dict[str, object] = {}
@@ -789,31 +1294,6 @@ class DeepSeekProviderTest(unittest.TestCase):
                 {"role": "user", "content": "What was it?"},
             ],
         )
-
-    def test_research_mode_enables_thinking(self) -> None:
-        captured_body: dict[str, object] = {}
-
-        def opener(request: Request, *, timeout: float) -> StubStreamingResponse:
-            del timeout
-            captured_body.update(json.loads(request.data.decode("utf-8")))
-            return StubStreamingResponse(
-                [
-                    b'data: {"choices":[{"delta":{"reasoning_content":"private reasoning"}}]}\n',
-                    b'data: {"choices":[{"delta":{"content":"Result"}}]}\n',
-                    b"data: [DONE]\n",
-                ]
-            )
-
-        provider = DeepSeekProvider(api_key="test-key", opener=opener)
-
-        result = "".join(
-            provider.stream_reply("Investigate this.", AgentMode.RESEARCH)
-        )
-
-        self.assertEqual(result, "Result")
-        self.assertEqual(captured_body["thinking"], {"type": "enabled"})
-        self.assertEqual(captured_body["reasoning_effort"], "high")
-        self.assertNotIn("private reasoning", result)
 
     def test_maps_upstream_status_without_exposing_response_body(self) -> None:
         def opener(_request: Request, *, timeout: float) -> StubStreamingResponse:

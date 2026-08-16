@@ -33,9 +33,19 @@ from .models import (
     ErrorResponse,
     HealthResponse,
     LocalPrincipal,
+    ResearchJob,
+    ResearchRequest,
 )
 from .observability import configure_logging, log_event
+from .openai_research_provider import OpenAIResearchProvider
 from .repositories import ConversationRepository
+from .research_provider import ResearchProvider, ResearchProviderError
+from .research_repositories import ResearchRepository
+from .research_service import (
+    ResearchJobConflictError,
+    ResearchService,
+)
+from .research_store import JsonResearchRepository, ResearchJobNotFoundError
 from .store import (
     LOCAL_USER_ID,
     ConversationNotFoundError,
@@ -64,6 +74,23 @@ def create_model_provider(settings: Settings) -> ModelProvider:
             max_tokens=settings.deepseek_max_tokens,
         )
     raise ValueError(f"Unsupported model provider: {settings.provider}")
+
+
+def create_research_provider(settings: Settings) -> ResearchProvider:
+    """Build the sole production ResearchProvider without making a request."""
+
+    if settings.research_provider != "openai":
+        raise ValueError(
+            f"Unsupported research provider: {settings.research_provider}"
+        )
+    return OpenAIResearchProvider(
+        api_key=settings.openai_api_key,
+        model=settings.research_model,
+        base_url=settings.openai_base_url,
+        reasoning_effort=settings.research_reasoning_effort,
+        max_tool_calls=settings.research_max_tool_calls,
+        timeout_seconds=settings.openai_timeout_seconds,
+    )
 
 
 def is_authorized_header(
@@ -138,12 +165,21 @@ def create_app(
     settings: Settings | None = None,
     repository: ConversationRepository | None = None,
     provider: ModelProvider | None = None,
+    research_repository: ResearchRepository | None = None,
+    research_provider: ResearchProvider | None = None,
 ) -> FastAPI:
     runtime_settings = settings or Settings.from_env()
     runtime_repository = repository or JsonConversationRepository(
         runtime_settings.data_path
     )
     runtime_provider = provider or create_model_provider(runtime_settings)
+    runtime_research_repository = (
+        research_repository
+        or JsonResearchRepository(runtime_settings.research_data_path)
+    )
+    runtime_research_provider = (
+        research_provider or create_research_provider(runtime_settings)
+    )
     logger = configure_logging(
         runtime_settings.log_level,
         runtime_settings.quiet,
@@ -153,10 +189,10 @@ def create_app(
         title="Mind Personal Agent API",
         summary="Streaming API and replaceable Agent Kernel boundaries.",
         description=(
-            "Mind exposes local and hosted ModelProvider implementations through "
-            "the same typed interface, with explicit billing and failure signals."
+            "Mind exposes replaceable Chat ModelProvider and long-running "
+            "ResearchProvider boundaries with explicit billing and failure signals."
         ),
-        version="0.5.0",
+        version="0.6.0",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -169,7 +205,17 @@ def create_app(
     application.state.settings = runtime_settings
     application.state.repository = runtime_repository
     application.state.provider = runtime_provider
+    application.state.research_repository = runtime_research_repository
+    application.state.research_provider = runtime_research_provider
     application.state.logger = logger
+    research_service = ResearchService(
+        conversations=runtime_repository,
+        jobs=runtime_research_repository,
+        provider=runtime_research_provider,
+        poll_interval_seconds=runtime_settings.research_poll_interval_seconds,
+        logger=logger,
+    )
+    application.state.research_service = research_service
 
     @application.middleware("http")
     async def request_size_limit(request: Request, call_next: Any) -> Any:
@@ -328,6 +374,13 @@ def create_app(
             environment=runtime_settings.environment,
             provider=runtime_provider.name,
             billable_model_calls=runtime_provider.billable_model_calls,
+            research_provider=runtime_research_provider.name,
+            billable_research_calls=runtime_research_provider.billable_calls,
+            research_mode=(
+                "live"
+                if runtime_research_provider.configured
+                else "unavailable"
+            ),
         )
 
     @application.get(
@@ -395,7 +448,180 @@ def create_app(
                 code="conversation_not_found",
                 message="Conversation does not exist for this user.",
             ) from None
+        runtime_research_repository.delete_for_conversation(
+            conversation_id,
+            principal.user_id,
+        )
         return Response(status_code=204)
+
+    @application.get(
+        "/api/research/{job_id}",
+        response_model=ResearchJob,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+        },
+        tags=["research"],
+        operation_id="getResearchJob",
+    )
+    async def get_research_job(
+        job_id: uuid.UUID,
+        principal: Principal,
+    ) -> ResearchJob:
+        try:
+            return research_service.get_job(job_id, principal.user_id)
+        except ResearchJobNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="research_job_not_found",
+                message="Research job does not exist for this user.",
+            ) from None
+
+    @application.post(
+        "/api/research",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "Research progress, sources, and report deltas as SSE.",
+                "content": {"text/event-stream": {}},
+            },
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
+        tags=["research"],
+        operation_id="startResearch",
+    )
+    async def start_research(
+        payload: ResearchRequest,
+        principal: Principal,
+        request: Request,
+    ) -> StreamingResponse:
+        try:
+            job = research_service.start_job(payload, principal.user_id)
+        except ConversationNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="conversation_not_found",
+                message="Conversation does not exist for this user.",
+            ) from None
+        request_id = _request_id(request)
+
+        def research_events() -> Iterator[str]:
+            for event in research_service.stream_job(
+                job.id,
+                principal.user_id,
+                request_id=request_id,
+            ):
+                yield _sse_event(event)
+
+        return StreamingResponse(
+            research_events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @application.post(
+        "/api/research/{job_id}/resume",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": (
+                    "Continue the saved OpenAI Response or start a new one after "
+                    "a terminal failure or cancellation."
+                ),
+                "content": {"text/event-stream": {}},
+            },
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+        },
+        tags=["research"],
+        operation_id="resumeResearch",
+    )
+    async def resume_research(
+        job_id: uuid.UUID,
+        principal: Principal,
+        request: Request,
+    ) -> StreamingResponse:
+        try:
+            job = research_service.prepare_resume(job_id, principal.user_id)
+        except ResearchJobNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="research_job_not_found",
+                message="Research job does not exist for this user.",
+            ) from None
+        except ResearchJobConflictError as error:
+            raise APIError(
+                status_code=409,
+                code="research_job_conflict",
+                message=str(error),
+            ) from None
+        except ResearchProviderError as error:
+            raise APIError(
+                status_code=503 if error.retryable else 502,
+                code=error.code,
+                message=error.public_message,
+            ) from None
+        request_id = _request_id(request)
+
+        def research_events() -> Iterator[str]:
+            for event in research_service.stream_job(
+                job.id,
+                principal.user_id,
+                request_id=request_id,
+            ):
+                yield _sse_event(event)
+
+        return StreamingResponse(
+            research_events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @application.post(
+        "/api/research/{job_id}/cancel",
+        response_model=ResearchJob,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+        },
+        tags=["research"],
+        operation_id="cancelResearch",
+    )
+    async def cancel_research(
+        job_id: uuid.UUID,
+        principal: Principal,
+    ) -> ResearchJob:
+        try:
+            return research_service.cancel_job(job_id, principal.user_id)
+        except ResearchJobNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="research_job_not_found",
+                message="Research job does not exist for this user.",
+            ) from None
+        except ResearchJobConflictError as error:
+            raise APIError(
+                status_code=409,
+                code="research_job_conflict",
+                message=str(error),
+            ) from None
+        except ResearchProviderError as error:
+            raise APIError(
+                status_code=503 if error.retryable else 502,
+                code=error.code,
+                message=error.public_message,
+            ) from None
 
     @application.post(
         "/api/chat",

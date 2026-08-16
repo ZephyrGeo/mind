@@ -41,6 +41,15 @@ class ResearchStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ResearchStepStatus(str, Enum):
+    """Legacy checkpoint compatibility; OpenAI production jobs do not plan steps."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 class ToolCallStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -63,6 +72,7 @@ class Message(StrictModel):
     conversation_id: UUID
     role: MessageRole
     content: str
+    research_job_id: UUID | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -109,6 +119,51 @@ class Attachment(StrictModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ResearchStep(StrictModel):
+    id: str = Field(min_length=1, max_length=64)
+    query: str = Field(min_length=1, max_length=1_000)
+    objective: str = Field(min_length=1, max_length=1_000)
+    status: ResearchStepStatus = ResearchStepStatus.PENDING
+    result_count: int = Field(default=0, ge=0)
+
+
+class ResearchPlan(StrictModel):
+    """Legacy checkpoint shape retained so existing local jobs remain readable."""
+
+    summary: str = Field(min_length=1, max_length=2_000)
+    steps: list[ResearchStep] = Field(min_length=1, max_length=6)
+
+
+class ResearchSource(StrictModel):
+    id: str = Field(min_length=1, max_length=32)
+    step_id: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=1_000)
+    url: str = Field(min_length=1, max_length=4_096)
+    snippet: str = Field(default="", max_length=8_000)
+    content: str = ""
+    published_at: str | None = Field(default=None, max_length=128)
+    retrieved_at: datetime = Field(default_factory=utc_now)
+
+
+class ResearchCitation(StrictModel):
+    source_id: str = Field(min_length=1, max_length=32)
+    title: str = Field(min_length=1, max_length=1_000)
+    url: str = Field(min_length=1, max_length=4_096)
+    start_index: int = Field(ge=0)
+    end_index: int = Field(gt=0)
+
+
+class ResearchCheckpoint(StrictModel):
+    # Legacy plan fields stay readable, but OpenAI Research persists only the
+    # response ID, sources, citations, report, and assistant-message identity.
+    plan: ResearchPlan | None = None
+    sources: list[ResearchSource] = Field(default_factory=list)
+    citations: list[ResearchCitation] = Field(default_factory=list)
+    completed_step_ids: list[str] = Field(default_factory=list)
+    report: str = ""
+    assistant_message_id: UUID | None = None
+
+
 class ResearchJob(StrictModel):
     id: UUID = Field(default_factory=uuid4)
     user_id: str
@@ -116,7 +171,10 @@ class ResearchJob(StrictModel):
     query: str
     status: ResearchStatus = ResearchStatus.QUEUED
     progress: float = Field(default=0, ge=0, le=1)
-    checkpoint: dict[str, Any] = Field(default_factory=dict)
+    provider_response_id: str | None = None
+    provider_status: str | None = None
+    previous_response_ids: list[str] = Field(default_factory=list)
+    checkpoint: ResearchCheckpoint = Field(default_factory=ResearchCheckpoint)
     failure_reason: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -185,6 +243,19 @@ class ChatRequest(StrictModel):
         return normalized
 
 
+class ResearchRequest(StrictModel):
+    conversation_id: UUID | None = None
+    query: str = Field(min_length=1, max_length=8_000)
+
+    @field_validator("query")
+    @classmethod
+    def query_must_contain_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Research query cannot be empty.")
+        return normalized
+
+
 class ConversationsResponse(StrictModel):
     conversations: list[ConversationSummary]
 
@@ -195,6 +266,9 @@ class HealthResponse(StrictModel):
     environment: str
     provider: str
     billable_model_calls: bool
+    research_provider: str
+    billable_research_calls: bool
+    research_mode: str
 
 
 class ErrorDetail(StrictModel):

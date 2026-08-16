@@ -44,3 +44,27 @@ class ConversationRepository(Protocol):
         """Atomically persist a user/assistant exchange and return its conversation ID."""
 
         ...
+
+    def append_user_message(
+        self,
+        conversation_id: UUID | str | None,
+        content: str,
+        mode: AgentMode | str,
+        *,
+        user_id: str,
+    ) -> str:
+        """Persist the user side of a long-running turn and return its conversation."""
+
+        ...
+
+    def append_assistant_message(
+        self,
+        conversation_id: UUID | str,
+        content: str,
+        *,
+        user_id: str,
+        research_job_id: UUID | str | None = None,
+    ) -> str:
+        """Persist one assistant message, idempotently for a research job."""
+
+        ...

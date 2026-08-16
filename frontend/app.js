@@ -2,11 +2,23 @@
 
 const React = require("react");
 const { createRoot } = require("react-dom/client");
+const { MarkdownContent } = require("./markdown.cjs");
 
 const h = React.createElement;
 const { useEffect, useRef, useState } = React;
 const API_BASE = window.__MIND_API__ ?? "http://127.0.0.1:8000";
 const LOCAL_TOKEN = "local-demo-token";
+
+const researchStatusLabels = {
+  queued: "Queued",
+  planning: "Planning the investigation",
+  collecting: "Collecting web evidence",
+  verifying: "Checking and organizing sources",
+  synthesizing: "Writing the cited report",
+  completed: "Research complete",
+  failed: "Research paused after an error",
+  cancelled: "Research stopped",
+};
 
 const navigation = [
   { icon: "chat-circle", label: "Chat", active: true },
@@ -88,6 +100,27 @@ function formatConversationTime(updatedAt) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+async function readSseStream(response, onEvent) {
+  if (!response.ok || !response.body) {
+    throw new Error(`API returned ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+      if (dataLine) onEvent(JSON.parse(dataLine.slice(6)));
+    }
+  }
 }
 
 function Brand({ onCollapse }) {
@@ -270,14 +303,22 @@ function Sidebar({
 function Header({
   apiState,
   conversationTitle,
+  mode,
   providerInfo,
   sidebarCollapsed,
   onToggleSidebar,
   onProviderInfo,
 }) {
-  const providerDetail = providerInfo.billable
-    ? "DeepSeek Provider · model calls may incur cost"
-    : "Fake Provider · no model calls · no cloud cost";
+  const providerDetail =
+    mode === "research"
+      ? `OpenAI Research Provider · ${
+          providerInfo.researchMode === "live"
+            ? "ready · calls may incur cost"
+            : "needs OPENAI_API_KEY"
+        }`
+      : providerInfo.billable
+        ? "DeepSeek Provider · model calls may incur cost"
+        : "Fake Provider · no model calls · no cloud cost";
 
   return h(
     "header",
@@ -311,7 +352,13 @@ function Header({
           h(
             "small",
             null,
-            providerInfo.billable ? "DeepSeek model" : "Local model",
+            mode === "research"
+              ? providerInfo.researchMode === "live"
+                ? "OpenAI research"
+                : "OpenAI key needed"
+              : providerInfo.billable
+                ? "DeepSeek model"
+                : "Local model",
           ),
         ),
         h(Icon, { name: "caret-down" }),
@@ -363,7 +410,83 @@ function SuggestionList({ onSuggestion }) {
   );
 }
 
-function Message({ message }) {
+function ResearchProgress({ research, onResume }) {
+  if (!research) return null;
+  const progress = Math.round((research.progress ?? 0) * 100);
+  const canResume = ["failed", "cancelled"].includes(research.status);
+  const sources = research.sources ?? [];
+
+  return h(
+    "section",
+    { className: "research-progress", "aria-label": "Research progress" },
+    h(
+      "div",
+      { className: "research-progress-heading" },
+      h(
+        "span",
+        { className: `research-state ${research.status ?? "queued"}` },
+        h(Icon, {
+          name: research.status === "completed" ? "check-circle" : "spinner-gap",
+        }),
+        researchStatusLabels[research.status] ?? "Preparing research",
+      ),
+      h("span", null, `OpenAI · ${progress}%`),
+    ),
+    h(
+      "div",
+      {
+        className: "research-progress-track",
+        role: "progressbar",
+        "aria-valuemin": 0,
+        "aria-valuemax": 100,
+        "aria-valuenow": progress,
+      },
+      h("span", { style: { width: `${progress}%` } }),
+    ),
+    sources.length
+      ? h(
+          "div",
+          { className: "research-sources" },
+          h("strong", null, `${sources.length} sources collected`),
+          h(
+            "div",
+            { className: "research-source-list" },
+            sources.map((source) =>
+              h(
+                "a",
+                {
+                  key: source.id,
+                  href: source.url,
+                  target: "_blank",
+                  rel: "noreferrer noopener",
+                  title: source.snippet || source.title,
+                },
+                h("span", null, source.id),
+                source.title,
+                h(Icon, { name: "arrow-square-out" }),
+              ),
+            ),
+          ),
+        )
+      : null,
+    canResume
+      ? h(
+          "button",
+          {
+            className: "research-resume",
+            type: "button",
+            onClick: () => onResume(research.jobId),
+          },
+          h(Icon, { name: "arrow-clockwise" }),
+          research.status === "cancelled"
+            ? "Restart as a new OpenAI task"
+            : "Resume OpenAI research",
+        )
+      : null,
+  );
+}
+
+function Message({ message, onResumeResearch }) {
   return h(
     "article",
     { className: `message ${message.role}` },
@@ -381,17 +504,32 @@ function Message({ message }) {
       h(
         "div",
         { className: "message-content" },
-        message.content || h("span", { className: "typing-dots" }, "Thinking"),
+        message.content
+          ? message.role === "assistant"
+            ? h(MarkdownContent, {
+                content: message.content,
+                citations: message.research?.citations,
+              })
+            : message.content
+          : message.research
+            ? null
+            : h("span", { className: "typing-dots" }, "Thinking"),
       ),
+      h(ResearchProgress, {
+        research: message.research,
+        onResume: (jobId) => onResumeResearch(message.id, jobId),
+      }),
     ),
   );
 }
 
-function Conversation({ messages, endRef }) {
+function Conversation({ messages, endRef, onResumeResearch }) {
   return h(
     "section",
     { className: "messages", "aria-live": "polite" },
-    messages.map((message) => h(Message, { message, key: message.id })),
+    messages.map((message) =>
+      h(Message, { message, key: message.id, onResumeResearch }),
+    ),
     h("div", { ref: endRef }),
   );
 }
@@ -548,8 +686,16 @@ function App() {
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [providerInfo, setProviderInfo] = useState({ name: "fake", billable: false });
+  const [providerInfo, setProviderInfo] = useState({
+    name: "fake",
+    billable: false,
+    researchName: "openai",
+    researchBillable: true,
+    researchMode: "unavailable",
+  });
   const abortRef = useRef(null);
+  const activeResearchJobRef = useRef(null);
+  const activeAssistantRef = useRef(null);
   const endRef = useRef(null);
 
   async function loadConversations() {
@@ -569,6 +715,9 @@ function App() {
       setProviderInfo({
         name: health.provider,
         billable: health.billable_model_calls,
+        researchName: health.research_provider,
+        researchBillable: health.billable_research_calls,
+        researchMode: health.research_mode,
       });
       setApiState("online");
     } catch {
@@ -592,6 +741,8 @@ function App() {
 
   function resetConversation() {
     abortRef.current?.abort();
+    activeResearchJobRef.current = null;
+    activeAssistantRef.current = null;
     setConversationId(null);
     setConversationTitle("New conversation");
     setMessages([]);
@@ -602,6 +753,8 @@ function App() {
 
   async function openConversation(conversation) {
     abortRef.current?.abort();
+    activeResearchJobRef.current = null;
+    activeAssistantRef.current = null;
     setIsStreaming(false);
     setApiState("checking");
     try {
@@ -614,17 +767,61 @@ function App() {
       setConversationId(payload.id);
       setConversationTitle(payload.title);
       setMode(payload.mode);
-      setMessages(
-        payload.messages.map((message) => ({
-          id: message.id,
-          role: message.role,
-          content: message.content,
-        })),
+      const hydratedMessages = await Promise.all(
+        payload.messages.map(async (message) => {
+          const baseMessage = {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+          };
+          if (!message.research_job_id) return baseMessage;
+          try {
+            const researchResponse = await fetch(
+              `${API_BASE}/api/research/${message.research_job_id}`,
+              { headers: { Authorization: `Bearer ${LOCAL_TOKEN}` } },
+            );
+            if (!researchResponse.ok) return baseMessage;
+            const job = await researchResponse.json();
+            return {
+              ...baseMessage,
+              content: job.checkpoint.report || baseMessage.content,
+              research: {
+                jobId: job.id,
+                status: job.status,
+                progress: job.progress,
+                providerResponseId: job.provider_response_id,
+                providerStatus: job.provider_status,
+                sources: job.checkpoint.sources,
+                citations: job.checkpoint.citations,
+              },
+            };
+          } catch {
+            return baseMessage;
+          }
+        }),
       );
+      setMessages(hydratedMessages);
       setInput("");
       setAttachments([]);
       setSidebarOpen(false);
       setApiState("online");
+      const activeMessage = [...hydratedMessages]
+        .reverse()
+        .find(
+          (message) =>
+            message.research?.jobId &&
+            ["queued", "planning", "collecting", "verifying", "synthesizing"].includes(
+              message.research.status,
+            ),
+        );
+      if (activeMessage) {
+        setIsStreaming(true);
+        activeResearchJobRef.current = activeMessage.research.jobId;
+        void runStreamingRequest({
+          endpoint: `/api/research/${activeMessage.research.jobId}/resume`,
+          assistantId: activeMessage.id,
+        });
+      }
     } catch {
       setApiState("offline");
       setToast("The conversation could not be opened.");
@@ -663,16 +860,149 @@ function App() {
     }
   }
 
+  function updateAssistantMessage(assistantId, update) {
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === assistantId ? update(message) : message,
+      ),
+    );
+  }
+
+  function handleStreamEvent(event, assistantId) {
+    if (event.type === "research_started") {
+      activeResearchJobRef.current = event.job_id;
+      setConversationId(event.conversation_id);
+      updateAssistantMessage(assistantId, (message) => ({
+        ...message,
+        research: {
+          ...(message.research ?? {}),
+          jobId: event.job_id,
+          status: event.status,
+          progress: event.progress,
+          restarted: event.restarted,
+        },
+      }));
+      if (event.restarted) {
+        setToast("Started a new OpenAI research task; the cancelled response was not reused.");
+      }
+    }
+    if (event.type === "status") {
+      updateAssistantMessage(assistantId, (message) => ({
+        ...message,
+        research: {
+          ...(message.research ?? {}),
+          jobId: event.job_id,
+          status: event.status,
+          progress: event.progress,
+        },
+      }));
+    }
+    if (event.type === "source") {
+      updateAssistantMessage(assistantId, (message) => {
+        const currentSources = message.research?.sources ?? [];
+        const sources = currentSources.some((source) => source.id === event.source.id)
+          ? currentSources
+          : [...currentSources, event.source];
+        return {
+          ...message,
+          research: { ...(message.research ?? {}), sources },
+        };
+      });
+    }
+    if (event.type === "delta") {
+      updateAssistantMessage(assistantId, (message) => ({
+        ...message,
+        content: message.content + event.delta,
+      }));
+    }
+    if (event.type === "done") {
+      setConversationId(event.conversation_id);
+      updateAssistantMessage(assistantId, (message) => ({
+        ...message,
+        research: message.research
+          ? {
+              ...message.research,
+              status: event.status ?? "completed",
+              progress: 1,
+              citations: event.citations ?? [],
+            }
+          : message.research,
+      }));
+    }
+    if (event.type === "error") {
+      updateAssistantMessage(assistantId, (message) => ({
+        ...message,
+        content: event.message,
+        research: message.research
+          ? { ...message.research, status: "failed" }
+          : message.research,
+      }));
+      setToast(
+        event.retryable
+          ? "OpenAI research paused. Retry to recover or restart the task."
+          : "Check the OpenAI Research configuration before retrying.",
+      );
+    }
+  }
+
+  async function runStreamingRequest({ endpoint, body, assistantId }) {
+    const controller = new AbortController();
+    abortRef.current = controller;
+    activeAssistantRef.current = assistantId;
+    try {
+      const response = await fetch(`${API_BASE}${endpoint}`, {
+        method: "POST",
+        headers: {
+          Accept: "text/event-stream",
+          Authorization: `Bearer ${LOCAL_TOKEN}`,
+          ...(body ? { "Content-Type": "application/json" } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+      setApiState("online");
+      await readSseStream(response, (event) => handleStreamEvent(event, assistantId));
+      setAttachments([]);
+      await loadConversations();
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        setApiState("offline");
+        updateAssistantMessage(assistantId, (message) => ({
+          ...message,
+          content: message.research
+            ? message.content
+            : "Mind could not complete the request. Check the local API and provider settings, then try again.",
+        }));
+        setToast(
+          "Connection interrupted. Reopen the conversation to restore the OpenAI research task.",
+        );
+      }
+    } finally {
+      setIsStreaming(false);
+      abortRef.current = null;
+      activeResearchJobRef.current = null;
+      activeAssistantRef.current = null;
+    }
+  }
+
   async function sendMessage() {
     const text = input.trim();
     if (!text || isStreaming) return;
 
+    const isResearch = mode === "research";
     const userMessage = { id: crypto.randomUUID(), role: "user", content: text };
     const assistantId = crypto.randomUUID();
     setMessages((current) => [
       ...current,
       userMessage,
-      { id: assistantId, role: "assistant", content: "" },
+      {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        research: isResearch
+          ? { status: "queued", progress: 0, sources: [], citations: [] }
+          : null,
+      },
     ]);
     setInput("");
     if (!conversationId) {
@@ -681,102 +1011,65 @@ function App() {
     setIsStreaming(true);
     setApiState("checking");
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    try {
-      const response = await fetch(`${API_BASE}/api/chat`, {
-        method: "POST",
-        headers: {
-          Accept: "text/event-stream",
-          Authorization: `Bearer ${LOCAL_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          conversation_id: conversationId,
-          message: text,
-          mode,
-          attachments: attachments.map((file) => ({
-            name: file.name,
-            size: file.size,
-          })),
-        }),
-        signal: controller.signal,
-      });
-      if (!response.ok || !response.body) {
-        throw new Error(`API returned ${response.status}`);
-      }
-
-      setApiState("online");
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-
-        for (const frame of frames) {
-          const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
-          if (!dataLine) continue;
-          const event = JSON.parse(dataLine.slice(6));
-          if (event.type === "delta") {
-            setMessages((current) =>
-              current.map((message) =>
-                message.id === assistantId
-                  ? { ...message, content: message.content + event.delta }
-                  : message,
-              ),
-            );
-          }
-          if (event.type === "done") setConversationId(event.conversation_id);
-          if (event.type === "error") {
-            setMessages((current) =>
-              current.map((message) =>
-                message.id === assistantId
-                  ? { ...message, content: event.message }
-                  : message,
-              ),
-            );
-            setToast(
-              event.retryable
-                ? "The model request failed. You can retry."
-                : "Check the model provider configuration.",
-            );
-          }
-        }
-      }
-
-      setAttachments([]);
-      await loadConversations();
-    } catch (error) {
-      if (error.name !== "AbortError") {
-        setApiState("offline");
-        setMessages((current) =>
-          current.map((message) =>
-            message.id === assistantId
-              ? {
-                  ...message,
-                  content:
-                    "Mind could not complete the request. Check the local API and model provider settings, then try again.",
-                }
-              : message,
-          ),
-        );
-      }
-    } finally {
-      setIsStreaming(false);
-      abortRef.current = null;
-    }
+    await runStreamingRequest({
+      endpoint: isResearch ? "/api/research" : "/api/chat",
+      body: isResearch
+        ? { conversation_id: conversationId, query: text }
+        : {
+            conversation_id: conversationId,
+            message: text,
+            mode,
+            attachments: attachments.map((file) => ({
+              name: file.name,
+              size: file.size,
+            })),
+          },
+      assistantId,
+    });
   }
 
-  function stopStreaming() {
+  async function resumeResearch(assistantId, jobId) {
+    if (!jobId || isStreaming) return;
+    updateAssistantMessage(assistantId, (message) => ({
+      ...message,
+      content: "",
+      research: { ...message.research, status: "queued" },
+    }));
+    setIsStreaming(true);
+    setApiState("checking");
+    activeResearchJobRef.current = jobId;
+    await runStreamingRequest({
+      endpoint: `/api/research/${jobId}/resume`,
+      assistantId,
+    });
+  }
+
+  async function stopStreaming() {
+    const jobId = activeResearchJobRef.current;
+    const assistantId = activeAssistantRef.current;
     abortRef.current?.abort();
+    if (jobId) {
+      try {
+        const response = await fetch(`${API_BASE}/api/research/${jobId}/cancel`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${LOCAL_TOKEN}` },
+        });
+        if (response.ok && assistantId) {
+          updateAssistantMessage(assistantId, (message) => ({
+            ...message,
+            research: { ...message.research, status: "cancelled" },
+          }));
+        }
+      } catch {
+        setToast("The stream stopped, but the research status could not be updated.");
+      }
+    }
     setIsStreaming(false);
-    setToast("Generation stopped.");
+    setToast(
+      jobId
+        ? "Research stopped. Restarting will create a new OpenAI task."
+        : "Generation stopped.",
+    );
   }
 
   function stageFiles(event) {
@@ -850,14 +1143,15 @@ function App() {
       h(Header, {
         apiState,
         conversationTitle,
+        mode,
         providerInfo,
         sidebarCollapsed,
         onToggleSidebar: openSidebar,
         onProviderInfo: () =>
           setToast(
-            providerInfo.billable
-              ? "DeepSeek is configured through the project-local environment."
-              : "The deterministic local provider is active.",
+            `Chat: ${providerInfo.billable ? "DeepSeek" : "Fake model"} · Research: OpenAI ${
+              providerInfo.researchMode === "live" ? "ready" : "needs OPENAI_API_KEY"
+            }`,
           ),
       }),
       h(
@@ -867,7 +1161,11 @@ function App() {
           ? h(
               "div",
               { className: "conversation-workspace" },
-              h(Conversation, { messages, endRef }),
+              h(Conversation, {
+                messages,
+                endRef,
+                onResumeResearch: resumeResearch,
+              }),
               h(Composer, composerProps),
             )
           : h(

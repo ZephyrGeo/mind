@@ -4,8 +4,8 @@ Mind is an original personal AI workspace for transparent conversations,
 deep research, explainable memory, and guarded autonomous routines.
 
 This repository contains the local vertical slice and FastAPI Agent Kernel.
-It defaults to a zero-cost Fake ModelProvider and can opt in to DeepSeek through
-environment-only credentials.
+Chat defaults to a zero-cost Fake ModelProvider and can opt in to DeepSeek.
+Deep Research uses an independent OpenAI ResearchProvider.
 
 ## What works now
 
@@ -14,6 +14,8 @@ environment-only credentials.
 - Deterministic Fake ModelProvider with no external model calls
 - Opt-in DeepSeek V4 streaming provider with explicit billing status
 - Bounded multi-turn model context from persisted conversation history
+- OpenAI Responses API Deep Research with background execution, built-in web
+  search, inline citations, complete source lists, cancel, and refresh recovery
 - Searchable, time-grouped conversation history with no display cap
 - Reopenable conversations after a page reload
 - Confirmed, tenant-scoped deletion of conversation history
@@ -43,7 +45,8 @@ npm run dev
 Then open <http://127.0.0.1:3000/>.
 
 The local API runs at <http://127.0.0.1:8000/>. Conversation data is written to
-`work/local-data/conversations.json`, which is intentionally ignored by source
+`work/local-data/conversations.json`; research checkpoints are written to
+`work/local-data/research-jobs.json`. Both are intentionally ignored by source
 control.
 
 The current milestone uses safe local defaults. For persistent project-local
@@ -66,6 +69,18 @@ After that, normal startup automatically loads `.env.local`:
 npm run dev
 ```
 
+Deep Research has one production provider: OpenAI. To enable it locally, add:
+
+```dotenv
+OPENAI_API_KEY=<your OpenAI API key>
+MIND_RESEARCH_PROVIDER=openai
+MIND_RESEARCH_MODEL=gpt-5.6-terra
+```
+
+Research starts a background OpenAI Response with built-in web search and can
+incur cost. The header reports whether Research is ready before a run starts.
+DeepSeek remains the optional Chat provider and is not used by Research.
+
 The default model is `deepseek-v4-flash`; set `MIND_DEEPSEEK_MODEL` to
 `deepseek-v4-pro` when you explicitly want the higher-cost model. Variables
 explicitly exported in the terminal take precedence over `.env.local`. See
@@ -81,8 +96,8 @@ and the provider/repository boundaries.
 npm run test:all
 ```
 
-The required test suite is deterministic and uses simulated DeepSeek SSE
-responses; it never calls a model or search service.
+The required test suite is deterministic and uses simulated DeepSeek SSE plus a
+mock OpenAI ResearchProvider; it never calls a model or search service.
 
 ## Run the API container
 
@@ -98,12 +113,12 @@ Then open <http://127.0.0.1:8000/docs>.
 1. Local React → Python → Fake Agent streaming slice — complete
 2. FastAPI, typed kernel boundaries, OpenAPI, and container — complete
 3. DeepSeek streaming provider and multi-turn conversations — complete
-4. Firebase Authentication and managed deployment
-5. File and voice inputs
-6. Checkpointed Deep Research workflow
+4. Local checkpointed Deep Research MVP — complete
+5. Firebase Authentication, Firestore, and managed deployment
+6. File and voice inputs
 7. Memory Ledger, Heartbeats, and Insight Diff
-8. Terraform, GCP deployment, CI/CD, monitoring, and report
+8. Production research workers, Terraform, CI/CD, monitoring, and report
 
-The Fake and DeepSeek providers share the same small interface. The JSON
-Repository can likewise be replaced by Firestore without rewriting the user
-experience.
+Fake and DeepSeek Chat providers share `ModelProvider`. OpenAI Research uses the
+separate `ResearchProvider` boundary. The JSON repositories can likewise be
+replaced by Firestore without rewriting the user experience.

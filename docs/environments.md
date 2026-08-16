@@ -1,15 +1,16 @@
 # Environment configuration
 
-Mind keeps configuration separate from source code. Local development can use
-the Fake Provider or explicitly opt in to DeepSeek; staging and production
-describe the contract that later deployment milestones must implement.
+Mind keeps configuration separate from source code. Chat can use the Fake
+Provider or explicitly opt in to DeepSeek. Deep Research uses OpenAI through a
+separate provider boundary.
 
 ## Environment matrix
 
 | Setting | Development | Test / CI | Staging | Production |
 |---|---|---|---|---|
 | Purpose | Local product work | Deterministic verification | Integrated pre-release checks | Approved users |
-| Agent provider | Fake or opt-in DeepSeek | Fake or mocked DeepSeek only | DeepSeek with a capped evaluation budget | DeepSeek with user quotas |
+| Chat provider | Fake or opt-in DeepSeek | Fake or mocked DeepSeek only | DeepSeek with a capped evaluation budget | DeepSeek with user quotas |
+| Research provider | OpenAI when configured | Mock OpenAI only | OpenAI with a capped evaluation budget | OpenAI with user quotas |
 | Authentication | Local bearer token | In-process test token | Firebase Authentication plus allowlist | Firebase Authentication plus allowlist |
 | Conversation store | Ignored local JSON | Temporary test directory | Firestore staging database | Firestore production database |
 | File store | Not implemented | Temporary fixtures | Dedicated staging bucket | Dedicated production bucket |
@@ -33,6 +34,7 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_ENV` | `development` in the example | Environment label reserved for upcoming configuration validation |
 | `MIND_LOCAL_TOKEN` | `local-demo-token` | Shared local-only bearer token; never valid for staging or production |
 | `MIND_DATA_PATH` | `work/local-data/conversations.json` | Ignored JSON persistence path |
+| `MIND_RESEARCH_DATA_PATH` | `work/local-data/research-jobs.json` | Ignored, atomic research checkpoint path |
 | `MIND_API_HOST` | `127.0.0.1` | API bind host; the container uses `0.0.0.0` |
 | `MIND_API_PORT` | `8000` | API port; the container uses `8080` |
 | `MIND_ALLOWED_ORIGINS` | Both local frontend origins | Comma-separated exact CORS origins |
@@ -44,6 +46,14 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_DEEPSEEK_MODEL` | `deepseek-v4-flash` | Hosted model ID; `deepseek-v4-pro` is the higher-cost option |
 | `MIND_DEEPSEEK_TIMEOUT_SECONDS` | `120` | Per-request upstream timeout |
 | `MIND_DEEPSEEK_MAX_TOKENS` | `2048` | Maximum generated tokens for one response |
+| `MIND_RESEARCH_PROVIDER` | `openai` | Provider selector retained as an abstraction boundary; `openai` is the only production value |
+| `OPENAI_API_KEY` | unset | Required to start local Research and required at startup in staging/production |
+| `MIND_OPENAI_BASE_URL` | `https://api.openai.com/v1` | HTTPS Responses API origin; credentials in URLs are rejected |
+| `MIND_RESEARCH_MODEL` | `gpt-5.6-terra` | OpenAI model used for background Research |
+| `MIND_RESEARCH_REASONING_EFFORT` | `high` | Reasoning effort sent with the Responses API request |
+| `MIND_RESEARCH_MAX_TOOL_CALLS` | `12` | Upper bound on built-in web-search tool calls |
+| `MIND_RESEARCH_POLL_INTERVAL_SECONDS` | `2` | Delay between background Response status checks |
+| `MIND_OPENAI_TIMEOUT_SECONDS` | `120` | Timeout for each OpenAI HTTP request |
 | `MIND_LOG_LEVEL` | `INFO` | Structured API log level |
 | `PORT` | `3000` | Local frontend port |
 | `PYTHON` | `python3` | Optional Python executable used by the local launcher |
@@ -63,6 +73,19 @@ MIND_MODEL_PROVIDER=deepseek
 MIND_DEEPSEEK_MODEL=deepseek-v4-flash
 ```
 
+For live Deep Research, add the independent OpenAI provider:
+
+```dotenv
+MIND_RESEARCH_PROVIDER=openai
+OPENAI_API_KEY=<your OpenAI API key>
+MIND_RESEARCH_MODEL=gpt-5.6-terra
+```
+
+Research does not use the Chat DeepSeek key and has no alternate production
+search provider. In development, the API can still start without an OpenAI key
+so Chat remains usable, but health reports Research as unavailable and a
+Research request fails closed.
+
 Then start normally:
 
 ```bash
@@ -70,11 +93,12 @@ npm run setup:api
 npm run dev
 ```
 
-Do not place the real key in `.env.example`, source control, frontend code, or
-support messages. `Settings` fails at startup when DeepSeek is selected without
-a key, and `/api/health` reports `billable_model_calls: true` when it is active.
-Only `npm run dev` loads `.env.local`; tests deliberately ignore it so required
-CI and local validation cannot accidentally make billable calls.
+Do not place real keys in `.env.example`, source control, frontend code, or
+support messages. `Settings` fails at startup when DeepSeek Chat is selected
+without its key; staging and production also require the OpenAI Research key.
+`/api/health` separately reports Chat and Research billing/readiness. Only
+`npm run dev` loads `.env.local`; tests deliberately ignore it so required CI
+and local validation cannot accidentally make billable calls.
 
 The frontend currently embeds the same demonstration token, so changing
 `MIND_LOCAL_TOKEN` alone will make local chat requests fail. This is an
@@ -82,14 +106,15 @@ explicit milestone 1 limitation, not a production authentication design.
 
 ## Test and CI guarantees
 
-Required CI runs `npm run test:all` with the Fake Agent and simulated DeepSeek
-HTTP streams. Tests must not require model credentials, GCP credentials, search
-credentials, OAuth tokens, network access, or a billable model. Any live-model
-evaluation must be a separate, explicitly budgeted job and must never replace
-the required zero-cost suite.
+Required CI runs `npm run test:all` with the Fake Agent, simulated DeepSeek HTTP
+streams, and a mock OpenAI ResearchProvider. Tests must not require model
+credentials, GCP credentials, OAuth tokens, network access, or a billable model.
+Any live-model evaluation must be a separate, explicitly budgeted job and must
+never replace the required zero-cost suite.
 
 Tests that write data must use temporary paths rather than
-`work/local-data/conversations.json`.
+`work/local-data/conversations.json` or
+`work/local-data/research-jobs.json`.
 
 ## Staging and production rules
 

@@ -1,7 +1,8 @@
 # Mind API
 
-The FastAPI service exposes a typed, streaming contract with a deterministic
-Fake Provider by default and an opt-in DeepSeek Provider for real model calls.
+The FastAPI service exposes typed streaming contracts for Chat and Research.
+Chat defaults to a deterministic Fake Provider and can opt in to DeepSeek;
+Research uses an independent OpenAI provider.
 
 Interactive documentation is available while the API is running:
 
@@ -18,6 +19,10 @@ Interactive documentation is available while the API is running:
 | `GET` | `/api/conversations/{conversation_id}` | Local bearer token | Full tenant-scoped conversation for reopening and context |
 | `DELETE` | `/api/conversations/{conversation_id}` | Local bearer token | Permanently delete one owned conversation; returns 204 |
 | `POST` | `/api/chat` | Local bearer token | Stream an assistant response using Server-Sent Events |
+| `POST` | `/api/research` | Local bearer token | Create and stream a checkpointed research job |
+| `GET` | `/api/research/{job_id}` | Local bearer token | Refresh one owned job from its saved OpenAI response ID |
+| `POST` | `/api/research/{job_id}/resume` | Local bearer token | Continue its OpenAI Response or explicitly restart a terminal task |
+| `POST` | `/api/research/{job_id}/cancel` | Local bearer token | Cancel a running OpenAI background Response |
 
 The current token is only a local development boundary. It is not production
 authentication and will be replaced by verified Firebase ID tokens.
@@ -33,10 +38,44 @@ authentication and will be replaced by verified Firebase ID tokens.
 }
 ```
 
-`mode` accepts `chat` or `research`. With DeepSeek enabled, research mode uses
-the model's thinking mode, but the checkpointed workflow and search tools are
-not implemented yet. Attachment entries only carry staged filename and size
-metadata; no file content is uploaded yet.
+`mode` accepts `chat` or `research`. The latter remains a single-model reasoning
+call for compatibility; the frontend uses the dedicated `/api/research`
+workflow for actual search. Attachment entries only carry staged filename and
+size metadata; no file content is uploaded yet.
+
+## Research request
+
+```json
+{
+  "conversation_id": null,
+  "query": "Compare the evidence for two personal-agent architectures."
+}
+```
+
+A new job first persists the user message and conversation ID, then starts an
+OpenAI Responses API request with `background: true`, built-in `web_search`, and
+complete web sources included. DeepSeek Chat is not part of this workflow.
+
+Research SSE frames are ordered but not every type occurs exactly once:
+
+```text
+data: {"type":"research_started","job_id":"...","conversation_id":"...","status":"queued","progress":0}
+
+data: {"type":"status","job_id":"...","status":"collecting","provider_status":"in_progress","progress":0.55}
+
+data: {"type":"source","job_id":"...","source":{"id":"S1","title":"...","url":"https://..."}}
+
+data: {"type":"delta","job_id":"...","delta":"## Findings"}
+
+data: {"type":"done","job_id":"...","conversation_id":"...","status":"completed","progress":1,"source_count":8,"citations":[{"source_id":"S1","url":"https://...","start_index":41,"end_index":44}]}
+```
+
+OpenAI `queued`, `in_progress`, `completed`, `failed`/`incomplete`, and
+`cancelled` states map onto the persisted Mind job. The OpenAI `response_id` is
+saved before polling, so a browser disconnect or page reload retrieves the same
+background Response instead of starting a duplicate. User cancellation calls
+the OpenAI cancel endpoint. Restarting a cancelled task creates a new Response
+and archives the previous response ID on the Mind job.
 
 ## Streaming response
 
@@ -84,7 +123,7 @@ or hyphens.
 
 ## Architecture boundaries
 
-`ModelProvider` owns model streaming. `FakeAgentProvider` declares that it makes
+`ModelProvider` owns chat model streaming. `FakeAgentProvider` declares that it makes
 no billable calls. `DeepSeekProvider` uses the OpenAI-compatible streaming Chat
 Completions endpoint and declares that calls are billable. The health endpoint
 lets the UI display this distinction before a message is sent.
@@ -96,6 +135,21 @@ keeps the newest turns that fit `MIND_MAX_CONTEXT_CHARACTERS`, and sends them in
 user/assistant order before the new user message. The limit includes the new
 message and prevents history from growing model cost without bound.
 
+`ResearchProvider` owns start, retrieve, cancel, and result parsing. The sole
+production implementation is `OpenAIResearchProvider`; tests inject a mock at
+the same boundary. It uses the Responses API with `gpt-5.6-terra`, background
+mode, and built-in web search. Parsed output includes final `output_text`, URL
+citation annotations, and the complete `web_search_call.action.sources` list.
+The frontend renders inline citations and source cards as external links. See
+OpenAI's official [background mode](https://developers.openai.com/api/docs/guides/background),
+[web search](https://developers.openai.com/api/docs/guides/tools-web-search), and
+[GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
+documentation for the upstream contract.
+
+`ResearchService` owns persistence, provider-status mapping, polling, SSE
+progress, cancellation, refresh recovery, and idempotent assistant-message
+writes. It depends only on `ResearchProvider`, not on an SDK or concrete client.
+
 The wire format and current model IDs follow the
 [official DeepSeek Chat Completions documentation](https://api-docs.deepseek.com/api/create-chat-completion).
 
@@ -104,6 +158,12 @@ exchange writes. `JsonConversationRepository` is the current ignored local
 implementation. The detail endpoint and model-context lookup return the same 404
 for missing and cross-tenant IDs. Firestore can replace the repository without
 changing route handlers.
+
+`ResearchRepository` persists tenant-scoped jobs separately under
+`work/local-data/research-jobs.json`. Provider response IDs, status, sources,
+citations, and reports are written atomically. Final assistant-message writes
+are idempotent by `research_job_id`, so polling or reconnecting cannot duplicate
+a completed report. Deleting a conversation also deletes its local jobs.
 
 Milestone-one local JSON records are normalized in memory when read, so older
 conversations that predate typed message IDs and tenant fields remain openable.
@@ -115,5 +175,6 @@ ownership is verified. Missing and cross-tenant IDs both return
 calling the endpoint.
 
 The shared Pydantic models define `User`, `Conversation`, `Message`,
-`Attachment`, `ResearchJob`, `Memory`, `Routine`, and `ToolCall` before their
-production repositories and endpoints are implemented.
+`Attachment`, typed research jobs/checkpoints/sources/citations, `Memory`,
+`Routine`, and `ToolCall`. Memory, routine, file, and voice repositories and
+endpoints remain future work.

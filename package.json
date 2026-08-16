@@ -1,6 +1,6 @@
 {
   "name": "mind-personal-agent",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -16,9 +16,9 @@
     "test:all": "npm test && npm run test:backend"
   },
   "dependencies": {
+    "firebase": "^12.17.1",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
-  "devDependencies": {},
   "type": "module"
 }
