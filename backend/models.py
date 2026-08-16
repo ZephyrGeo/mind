@@ -95,7 +95,7 @@ class Conversation(StrictModel):
     user_id: str
     title: str
     mode: AgentMode = AgentMode.CHAT
-    messages: list[Message] = Field(default_factory=list)
+    messages: list[Message] = Field(default_factory=list[Message])
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -157,8 +157,8 @@ class ResearchCheckpoint(StrictModel):
     # Legacy plan fields stay readable, but OpenAI Research persists only the
     # response ID, sources, citations, report, and assistant-message identity.
     plan: ResearchPlan | None = None
-    sources: list[ResearchSource] = Field(default_factory=list)
-    citations: list[ResearchCitation] = Field(default_factory=list)
+    sources: list[ResearchSource] = Field(default_factory=list[ResearchSource])
+    citations: list[ResearchCitation] = Field(default_factory=list[ResearchCitation])
     completed_step_ids: list[str] = Field(default_factory=list)
     report: str = ""
     assistant_message_id: UUID | None = None
@@ -232,7 +232,10 @@ class ChatRequest(StrictModel):
     conversation_id: UUID | None = None
     message: str = Field(min_length=1, max_length=32_000)
     mode: AgentMode = AgentMode.CHAT
-    attachments: list[AttachmentInput] = Field(default_factory=list, max_length=10)
+    attachments: list[AttachmentInput] = Field(
+        default_factory=list[AttachmentInput],
+        max_length=10,
+    )
 
     @field_validator("message")
     @classmethod
@@ -272,7 +275,7 @@ class HealthResponse(StrictModel):
 
 
 class ErrorDetail(StrictModel):
-    location: list[str | int] = Field(default_factory=list)
+    location: list[str | int] = Field(default_factory=list[str | int])
     message: str
     type: str
 
@@ -281,7 +284,7 @@ class ErrorBody(StrictModel):
     code: str
     message: str
     request_id: str
-    details: list[ErrorDetail] = Field(default_factory=list)
+    details: list[ErrorDetail] = Field(default_factory=list[ErrorDetail])
 
 
 class ErrorResponse(StrictModel):
