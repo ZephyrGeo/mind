@@ -8,7 +8,12 @@
   "scripts": {
     "setup:api": "node scripts/setup-api.mjs",
     "dev": "node --env-file-if-exists=.env.local scripts/start-local.mjs",
+    "dev:firebase": "node --env-file-if-exists=.env.local --env-file-if-exists=.env.firebase.local scripts/start-local.mjs",
+    "dev:emulator": "node --env-file-if-exists=.env.local scripts/start-emulator-local.mjs",
     "dev:web": "node scripts/dev.mjs",
+    "emulators": "firebase emulators:start --project demo-mind-local --only auth,firestore",
+    "deploy:staging": "node --env-file-if-exists=.env.local --env-file-if-exists=.env.firebase.local scripts/deploy-staging.mjs",
+    "test:rules": "firebase emulators:exec --project demo-mind-local --only auth,firestore \"node --test tests/firestore-rules.test.mjs\"",
     "build": "node scripts/build.mjs",
     "preview": "node scripts/dev.mjs --no-watch",
     "test": "npm run build && node --test tests/*.test.mjs",

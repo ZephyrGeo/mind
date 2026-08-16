@@ -9,6 +9,9 @@ from .models import ResearchJob
 
 
 class ResearchRepository(Protocol):
+    def list_jobs(self, user_id: str) -> list[ResearchJob]:
+        ...
+
     def create_job(self, job: ResearchJob) -> ResearchJob:
         ...
 
@@ -29,4 +32,7 @@ class ResearchRepository(Protocol):
         conversation_id: UUID | str,
         user_id: str,
     ) -> None:
+        ...
+
+    def delete_for_user(self, user_id: str) -> None:
         ...

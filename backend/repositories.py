@@ -32,6 +32,11 @@ class ConversationRepository(Protocol):
 
         ...
 
+    def delete_for_user(self, user_id: str) -> None:
+        """Delete every conversation owned by exactly one user."""
+
+        ...
+
     def append_exchange(
         self,
         conversation_id: UUID | str | None,

@@ -1,0 +1,12 @@
+project_id          = "mind-staging-ce427"
+region              = "asia-northeast1"
+environment         = "staging"
+allowed_user_emails = "owner@example.com"
+
+# Fill these after the first Hosting/API URL is known.
+allowed_origins  = "https://mind-staging-ce427.web.app"
+api_image        = "asia-northeast1-docker.pkg.dev/mind-staging-ce427/mind-api/mind-api@sha256:replace-me"
+deploy_cloud_run = false
+
+# The database already exists; import it before changing this to true.
+manage_firestore_database = false

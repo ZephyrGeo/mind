@@ -1,0 +1,3 @@
+# Deterministic local/CI quality tools; runtime dependencies stay in requirements.lock.
+pyright==1.1.411
+ruff==0.16.0

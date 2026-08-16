@@ -1,6 +1,8 @@
 # Direct dependency lock for the API and its contract tests.
 # Update these pins deliberately and validate them in CI before merging.
 fastapi==0.141.1
+firebase-admin==7.5.0
+google-cloud-firestore==2.28.0
 httpx2==2.7.0
 pydantic==2.13.4
 uvicorn==0.52.0

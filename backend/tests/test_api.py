@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request
@@ -19,6 +20,7 @@ from backend.app import (
     is_authorized_header,
     validate_chat_payload,
 )
+from backend.auth import LocalAccountManager
 from backend.config import Settings
 from backend.conversation_context import select_recent_history
 from backend.deepseek_provider import DeepSeekProvider
@@ -29,6 +31,7 @@ from backend.models import (
     Attachment,
     ChatRequest,
     Conversation,
+    LocalPrincipal,
     Memory,
     Message,
     MessageRole,
@@ -876,10 +879,85 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertIn("/api/chat", schema["paths"])
         self.assertIn("/api/research", schema["paths"])
         self.assertIn("/api/research/{job_id}", schema["paths"])
+        self.assertIn("/api/account", schema["paths"])
         self.assertIn("ResearchRequest", schema["components"]["schemas"])
         self.assertIn("ResearchJob", schema["components"]["schemas"])
         self.assertIn("ChatRequest", schema["components"]["schemas"])
         self.assertIn("ErrorResponse", schema["components"]["schemas"])
+
+    def test_account_deletion_stops_active_research_and_removes_owned_data(
+        self,
+    ) -> None:
+        conversation_id = self.repository.append_user_message(
+            None,
+            "Research before deleting my account.",
+            AgentMode.RESEARCH,
+            user_id="local-developer",
+        )
+        job = ResearchJob(
+            user_id="local-developer",
+            conversation_id=uuid.UUID(conversation_id),
+            query="Research before deleting my account.",
+            status=ResearchStatus.COLLECTING,
+            provider_response_id="resp_account_delete",
+            provider_status="in_progress",
+        )
+        self.research_repository.create_job(job)
+        self.research_provider.register(
+            "resp_account_delete",
+            {"id": "resp_account_delete", "status": "in_progress", "output": []},
+        )
+
+        response = self.client.delete(
+            "/api/account",
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(
+            self.research_provider.cancel_calls,
+            ["resp_account_delete"],
+        )
+        self.assertEqual(self.repository.list_conversations("local-developer"), [])
+        self.assertEqual(self.research_repository.list_jobs("local-developer"), [])
+
+    def test_firebase_account_deletion_requires_recent_authentication(self) -> None:
+        class OldFirebasePrincipalVerifier:
+            method = "firebase"
+
+            def verify(self, _token: str) -> LocalPrincipal:
+                return LocalPrincipal(
+                    user_id="firebase-user",
+                    email="owner@example.com",
+                    email_verified=True,
+                    authenticated_at=datetime.now(timezone.utc)
+                    - timedelta(hours=1),
+                    authentication_method="firebase",
+                )
+
+        client = TestClient(
+            create_app(
+                settings=self.settings,
+                repository=self.repository,
+                provider=self.provider,
+                research_repository=self.research_repository,
+                research_provider=self.research_provider,
+                principal_verifier=OldFirebasePrincipalVerifier(),
+                account_manager=LocalAccountManager(),
+            )
+        )
+        self.addCleanup(client.close)
+
+        response = client.delete(
+            "/api/account",
+            headers={"Authorization": "Bearer firebase-token"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "recent_authentication_required",
+        )
 
 
 class MindDomainAndRepositoryTest(unittest.TestCase):
@@ -1077,12 +1155,21 @@ class MindDomainAndRepositoryTest(unittest.TestCase):
             },
         )
 
-    def test_production_rejects_the_local_demo_token(self) -> None:
+    def test_production_requires_firebase_and_restricted_access(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
-            "cannot be used outside development or test",
+            "Firebase authentication",
         ):
             Settings(environment="production")
+
+        with self.assertRaisesRegex(ValueError, "MIND_ALLOWED_USER_EMAILS"):
+            Settings(
+                environment="production",
+                auth_provider="firebase",
+                firebase_project_id="mind-production",
+                openai_api_key="test-key",
+                allowed_origins=("https://mind.example",),
+            )
 
         with self.assertRaisesRegex(
             ValueError,
@@ -1194,7 +1281,10 @@ class OpenAIResearchProviderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "OPENAI_API_KEY"):
             Settings(
                 environment="production",
-                local_token="production-token",
+                auth_provider="firebase",
+                firebase_project_id="mind-production",
+                allowed_user_emails=("owner@example.com",),
+                persistence_provider="firestore",
                 allowed_origins=("https://mind.example",),
             )
         provider = create_research_provider(

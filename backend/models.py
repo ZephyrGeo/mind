@@ -289,5 +289,11 @@ class ErrorResponse(StrictModel):
 
 
 class LocalPrincipal(StrictModel):
+    """Authenticated identity; name retained for API compatibility."""
+
     user_id: str
+    email: str | None = None
+    display_name: str | None = None
+    email_verified: bool = False
+    authenticated_at: datetime | None = None
     authentication_method: str = "local_token"

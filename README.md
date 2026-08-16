@@ -19,12 +19,16 @@ Deep Research uses an independent OpenAI ResearchProvider.
 - Searchable, time-grouped conversation history with no display cap
 - Reopenable conversations after a page reload
 - Confirmed, tenant-scoped deletion of conversation history
-- Local bearer-token authentication boundary
+- Firebase registration, email verification, login, logout, and account deletion
+- FastAPI Firebase ID-token verification and restricted-access allowlist
 - Typed Pydantic API and domain models
 - Replaceable ModelProvider and ConversationRepository interfaces
 - Request IDs, standard error envelopes, and structured JSON logs
 - OpenAPI documentation at `/docs`, `/redoc`, and `/openapi.json`
 - Atomic, tenant-scoped JSON conversation persistence under `work/`
+- Replaceable Firestore conversation and Research repositories
+- Firebase Emulator and tenant-isolation Security Rules test workflow
+- Terraform staging foundation and CI quality gates
 - Python 3.12 container image running as a non-root user
 - Frontend and backend automated tests
 - One-command local startup
@@ -99,6 +103,27 @@ npm run test:all
 The required test suite is deterministic and uses simulated DeepSeek SSE plus a
 mock OpenAI ResearchProvider; it never calls a model or search service.
 
+For the Firebase Emulator tenant-isolation test, run:
+
+```bash
+npm run test:rules
+```
+
+For an interactive emulator workspace, start `npm run emulators` in one terminal
+and `npm run dev:emulator` in another. Real Firebase Auth can be tested with the
+ignored `.env.firebase.local` file and `npm run dev:firebase`.
+
+After Firebase and gcloud login, the early staging slice is deployed with:
+
+```bash
+npm run deploy:staging
+```
+
+The script keeps model keys server-side in Secret Manager, deploys the API with
+scale-to-zero, publishes Firestore rules and Firebase Hosting, and verifies the
+Cloud Run health response before reporting the URLs. See
+[Staging infrastructure](infra/README.md) for the Terraform equivalent.
+
 ## Run the API container
 
 ```bash
@@ -114,7 +139,7 @@ Then open <http://127.0.0.1:8000/docs>.
 2. FastAPI, typed kernel boundaries, OpenAPI, and container — complete
 3. DeepSeek streaming provider and multi-turn conversations — complete
 4. Local checkpointed Deep Research MVP — complete
-5. Firebase Authentication, Firestore, and managed deployment
+5. Firebase Authentication and Firestore foundation — in progress
 6. File and voice inputs
 7. Memory Ledger, Heartbeats, and Insight Diff
 8. Production research workers, Terraform, CI/CD, monitoring, and report

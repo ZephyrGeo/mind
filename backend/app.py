@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Request, Response
@@ -19,10 +20,22 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import DEFAULT_LOCAL_TOKEN, Settings
+from .auth import (
+    AccountManager,
+    FirebasePrincipalVerifier,
+    IdentityVerificationError,
+    LocalAccountManager,
+    LocalTokenPrincipalVerifier,
+    PrincipalVerifier,
+)
 from .conversation_context import select_recent_history
 from .deepseek_provider import DeepSeekProvider
 from .errors import APIError
 from .fake_agent import FakeAgentProvider
+from .firestore_store import (
+    FirestoreConversationRepository,
+    FirestoreResearchRepository,
+)
 from .model_provider import ModelProvider, ModelProviderError
 from .models import (
     ChatRequest,
@@ -91,6 +104,74 @@ def create_research_provider(settings: Settings) -> ResearchProvider:
         max_tool_calls=settings.research_max_tool_calls,
         timeout_seconds=settings.openai_timeout_seconds,
     )
+
+
+def create_principal_verifier(settings: Settings) -> PrincipalVerifier:
+    """Build the configured identity boundary without handling a request."""
+
+    if settings.auth_provider == "local":
+        return LocalTokenPrincipalVerifier(
+            expected_token=settings.local_token,
+            user_id=LOCAL_USER_ID,
+        )
+    if settings.auth_provider == "firebase":
+        if settings.firebase_project_id is None:
+            raise ValueError("Firebase project ID is missing.")
+        return FirebasePrincipalVerifier(
+            project_id=settings.firebase_project_id,
+            allowed_user_emails=settings.allowed_user_emails,
+            require_verified_email=settings.require_verified_email,
+            check_revoked=settings.firebase_check_revoked,
+        )
+    raise ValueError(f"Unsupported auth provider: {settings.auth_provider}")
+
+
+def create_conversation_repository(settings: Settings) -> ConversationRepository:
+    """Build local JSON or production Firestore persistence."""
+
+    if settings.persistence_provider == "json":
+        return JsonConversationRepository(settings.data_path)
+    if settings.persistence_provider == "firestore":
+        if settings.firebase_project_id is None:
+            raise ValueError("Firebase project ID is missing.")
+        return FirestoreConversationRepository(
+            project_id=settings.firebase_project_id,
+            database_id=settings.firestore_database_id,
+        )
+    raise ValueError(
+        f"Unsupported persistence provider: {settings.persistence_provider}"
+    )
+
+
+def create_research_repository(settings: Settings) -> ResearchRepository:
+    """Build local JSON or production Firestore Research persistence."""
+
+    if settings.persistence_provider == "json":
+        return JsonResearchRepository(settings.research_data_path)
+    if settings.persistence_provider == "firestore":
+        if settings.firebase_project_id is None:
+            raise ValueError("Firebase project ID is missing.")
+        return FirestoreResearchRepository(
+            project_id=settings.firebase_project_id,
+            database_id=settings.firestore_database_id,
+        )
+    raise ValueError(
+        f"Unsupported persistence provider: {settings.persistence_provider}"
+    )
+
+
+def create_account_manager(
+    settings: Settings,
+    principal_verifier: PrincipalVerifier,
+) -> AccountManager:
+    """Build the account-lifecycle boundary for the configured identity mode."""
+
+    if settings.auth_provider == "local":
+        return LocalAccountManager()
+    delete_user = getattr(principal_verifier, "delete_user", None)
+    if settings.auth_provider == "firebase" and callable(delete_user):
+        return principal_verifier  # type: ignore[return-value]
+    raise ValueError("Firebase account deletion requires FirebasePrincipalVerifier.")
 
 
 def is_authorized_header(
@@ -167,18 +248,26 @@ def create_app(
     provider: ModelProvider | None = None,
     research_repository: ResearchRepository | None = None,
     research_provider: ResearchProvider | None = None,
+    principal_verifier: PrincipalVerifier | None = None,
+    account_manager: AccountManager | None = None,
 ) -> FastAPI:
     runtime_settings = settings or Settings.from_env()
-    runtime_repository = repository or JsonConversationRepository(
-        runtime_settings.data_path
+    runtime_repository = repository or create_conversation_repository(
+        runtime_settings
     )
     runtime_provider = provider or create_model_provider(runtime_settings)
     runtime_research_repository = (
-        research_repository
-        or JsonResearchRepository(runtime_settings.research_data_path)
+        research_repository or create_research_repository(runtime_settings)
     )
     runtime_research_provider = (
         research_provider or create_research_provider(runtime_settings)
+    )
+    runtime_principal_verifier = (
+        principal_verifier or create_principal_verifier(runtime_settings)
+    )
+    runtime_account_manager = account_manager or create_account_manager(
+        runtime_settings,
+        runtime_principal_verifier,
     )
     logger = configure_logging(
         runtime_settings.log_level,
@@ -207,6 +296,8 @@ def create_app(
     application.state.provider = runtime_provider
     application.state.research_repository = runtime_research_repository
     application.state.research_provider = runtime_research_provider
+    application.state.principal_verifier = runtime_principal_verifier
+    application.state.account_manager = runtime_account_manager
     application.state.logger = logger
     research_service = ResearchService(
         conversations=runtime_repository,
@@ -342,24 +433,28 @@ def create_app(
             message="The request could not be completed.",
         )
 
-    async def require_local_principal(
+    async def require_principal(
         credentials: Annotated[
             HTTPAuthorizationCredentials | None,
             Depends(bearer_scheme),
         ],
     ) -> LocalPrincipal:
-        if credentials is None or not hmac.compare_digest(
-            credentials.credentials,
-            runtime_settings.local_token,
-        ):
+        if credentials is None:
             raise APIError(
                 status_code=401,
                 code="authentication_required",
-                message="A valid local token is required.",
+                message="A bearer token is required.",
             )
-        return LocalPrincipal(user_id=LOCAL_USER_ID)
+        try:
+            return runtime_principal_verifier.verify(credentials.credentials)
+        except IdentityVerificationError as error:
+            raise APIError(
+                status_code=error.status_code,
+                code=error.code,
+                message=error.message,
+            ) from error
 
-    Principal = Annotated[LocalPrincipal, Depends(require_local_principal)]
+    Principal = Annotated[LocalPrincipal, Depends(require_principal)]
 
     @application.get(
         "/api/health",
@@ -429,6 +524,7 @@ def create_app(
         responses={
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
         },
         tags=["conversations"],
         operation_id="deleteConversation",
@@ -437,6 +533,32 @@ def create_app(
         conversation_id: uuid.UUID,
         principal: Principal,
     ) -> Response:
+        active_statuses = {
+            "queued",
+            "planning",
+            "collecting",
+            "verifying",
+            "synthesizing",
+        }
+        for job in runtime_research_repository.list_jobs(principal.user_id):
+            if (
+                job.conversation_id != conversation_id
+                or job.status.value not in active_statuses
+            ):
+                continue
+            try:
+                research_service.cancel_job(job.id, principal.user_id)
+            except ResearchJobConflictError:
+                continue
+            except ResearchProviderError as error:
+                raise APIError(
+                    status_code=503,
+                    code="conversation_cleanup_blocked",
+                    message=(
+                        "Mind could not stop the active Research task. "
+                        "Please retry conversation deletion."
+                    ),
+                ) from error
         try:
             runtime_repository.delete_conversation(
                 conversation_id,
@@ -452,6 +574,84 @@ def create_app(
             conversation_id,
             principal.user_id,
         )
+        return Response(status_code=204)
+
+    @application.delete(
+        "/api/account",
+        status_code=204,
+        responses={
+            401: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["account"],
+        operation_id="deleteAccount",
+    )
+    async def delete_account(principal: Principal) -> Response:
+        if principal.authentication_method == "firebase":
+            authenticated_at = principal.authenticated_at
+            age_seconds = (
+                (datetime.now(timezone.utc) - authenticated_at).total_seconds()
+                if authenticated_at is not None
+                else float("inf")
+            )
+            if age_seconds > runtime_settings.account_deletion_max_auth_age_seconds:
+                raise APIError(
+                    status_code=401,
+                    code="recent_authentication_required",
+                    message=(
+                        "Sign out and sign in again before deleting your account."
+                    ),
+                )
+
+        active_statuses = {
+            "queued",
+            "planning",
+            "collecting",
+            "verifying",
+            "synthesizing",
+        }
+        for job in runtime_research_repository.list_jobs(principal.user_id):
+            if job.status.value not in active_statuses:
+                continue
+            try:
+                research_service.cancel_job(job.id, principal.user_id)
+            except ResearchJobConflictError:
+                continue
+            except ResearchProviderError as error:
+                raise APIError(
+                    status_code=503,
+                    code="account_cleanup_blocked",
+                    message=(
+                        "Mind could not stop an active Research task. "
+                        "Please retry account deletion."
+                    ),
+                ) from error
+
+        runtime_repository.delete_for_user(principal.user_id)
+        runtime_research_repository.delete_for_user(principal.user_id)
+        try:
+            runtime_account_manager.delete_user(principal.user_id)
+        except Exception as error:
+            logger.exception(
+                "account_identity_deletion_failed",
+                extra={
+                    "event_data": {
+                        "user_id_hash": hashlib.sha256(
+                            principal.user_id.encode("utf-8")
+                        ).hexdigest()[:16],
+                        "result_status": "error",
+                    }
+                },
+            )
+            raise APIError(
+                status_code=503,
+                code="identity_deletion_failed",
+                message=(
+                    "Your Mind data was removed, but the sign-in account could "
+                    "not be deleted. Please retry."
+                ),
+            ) from error
         return Response(status_code=204)
 
     @application.get(

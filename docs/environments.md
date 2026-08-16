@@ -32,7 +32,13 @@ exported in the terminal takes precedence over the same variable in the file.
 | Variable | Default | Scope |
 |---|---|---|
 | `MIND_ENV` | `development` in the example | Environment label reserved for upcoming configuration validation |
+| `MIND_AUTH_PROVIDER` | `local` | `local` or `firebase`; staging/production require Firebase |
 | `MIND_LOCAL_TOKEN` | `local-demo-token` | Shared local-only bearer token; never valid for staging or production |
+| `MIND_FIREBASE_PROJECT_ID` | unset | Firebase/GCP project used for token verification and Firestore |
+| `MIND_ALLOWED_USER_EMAILS` | unset | Comma-separated restricted-access allowlist |
+| `MIND_REQUIRE_VERIFIED_EMAIL` | `0` | Require Firebase email verification when set to `1` |
+| `MIND_PERSISTENCE_PROVIDER` | `json` | `json` or `firestore`; staging/production require Firestore |
+| `MIND_FIRESTORE_DATABASE_ID` | `(default)` | Firestore database ID |
 | `MIND_DATA_PATH` | `work/local-data/conversations.json` | Ignored JSON persistence path |
 | `MIND_RESEARCH_DATA_PATH` | `work/local-data/research-jobs.json` | Ignored, atomic research checkpoint path |
 | `MIND_API_HOST` | `127.0.0.1` | API bind host; the container uses `0.0.0.0` |
@@ -93,6 +99,18 @@ npm run setup:api
 npm run dev
 ```
 
+Firebase development options:
+
+```bash
+# Deterministic local Auth + Firestore (two terminals)
+npm run emulators
+npm run dev:emulator
+
+# Real Firebase Auth using the ignored project config
+gcloud auth application-default login
+npm run dev:firebase
+```
+
 Do not place real keys in `.env.example`, source control, frontend code, or
 support messages. `Settings` fails at startup when DeepSeek Chat is selected
 without its key; staging and production also require the OpenAI Research key.
@@ -100,9 +118,8 @@ without its key; staging and production also require the OpenAI Research key.
 `npm run dev` loads `.env.local`; tests deliberately ignore it so required CI
 and local validation cannot accidentally make billable calls.
 
-The frontend currently embeds the same demonstration token, so changing
-`MIND_LOCAL_TOKEN` alone will make local chat requests fail. This is an
-explicit milestone 1 limitation, not a production authentication design.
+The local frontend uses the demonstration token only in local auth mode. In
+Firebase mode it obtains and refreshes the signed-in user's ID token.
 
 ## Test and CI guarantees
 

@@ -2,12 +2,16 @@
 
 const React = require("react");
 const { createRoot } = require("react-dom/client");
+const { createAuthService } = require("./auth.cjs");
 const { MarkdownContent } = require("./markdown.cjs");
 
 const h = React.createElement;
 const { useEffect, useRef, useState } = React;
-const API_BASE = window.__MIND_API__ ?? "http://127.0.0.1:8000";
+const RUNTIME_CONFIG = window.__MIND_CONFIG__ ?? {};
+const API_BASE =
+  window.__MIND_API__ ?? RUNTIME_CONFIG.apiBase ?? "http://127.0.0.1:8000";
 const LOCAL_TOKEN = "local-demo-token";
+const authService = createAuthService(RUNTIME_CONFIG, LOCAL_TOKEN);
 
 const researchStatusLabels = {
   queued: "Queued",
@@ -104,7 +108,13 @@ function formatConversationTime(updatedAt) {
 
 async function readSseStream(response, onEvent) {
   if (!response.ok || !response.body) {
-    throw new Error(`API returned ${response.status}`);
+    const payload = await response.json().catch(() => null);
+    const error = new Error(
+      payload?.error?.message || `Mind API returned ${response.status}.`,
+    );
+    error.isApiError = true;
+    error.code = payload?.error?.code;
+    throw error;
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -150,10 +160,13 @@ function Brand({ onCollapse }) {
 function Sidebar({
   conversations,
   activeConversationId,
+  currentUser,
   onCollapse,
   onNewChat,
   onOpenConversation,
   onDeleteConversation,
+  onDeleteAccount,
+  onSignOut,
 }) {
   const [conversationQuery, setConversationQuery] = useState("");
   const searchRef = useRef(null);
@@ -280,22 +293,57 @@ function Sidebar({
     h(
       "div",
       { className: "sidebar-footer" },
-      h("div", { className: "avatar" }, "FY"),
+      h(
+        "div",
+        { className: "avatar" },
+        (currentUser?.displayName || currentUser?.email || "FY")
+          .split(/\s+|@/)
+          .filter(Boolean)
+          .slice(0, 2)
+          .map((part) => part[0])
+          .join("")
+          .toUpperCase(),
+      ),
       h(
         "div",
         { className: "profile-copy" },
-        h("strong", null, "Local developer"),
-        h("span", null, "Private workspace"),
+        h(
+          "strong",
+          null,
+          currentUser?.displayName || currentUser?.email || "Local developer",
+        ),
+        h(
+          "span",
+          null,
+          currentUser?.email ? "Private Firebase workspace" : "Private workspace",
+        ),
       ),
-      h(
-        "button",
-        {
-          className: "icon-button ghost",
-          type: "button",
-          "aria-label": "Settings",
-        },
-        h(Icon, { name: "dots-three" }),
-      ),
+      onDeleteAccount
+        ? h(
+            "button",
+            {
+              className: "icon-button ghost danger",
+              type: "button",
+              onClick: onDeleteAccount,
+              "aria-label": "Delete account",
+              title: "Delete account",
+            },
+            h(Icon, { name: "user-minus" }),
+          )
+        : null,
+      onSignOut
+        ? h(
+            "button",
+            {
+              className: "icon-button ghost",
+              type: "button",
+              onClick: onSignOut,
+              "aria-label": "Sign out",
+              title: "Sign out",
+            },
+            h(Icon, { name: "sign-out" }),
+          )
+        : null,
     ),
   );
 }
@@ -673,7 +721,213 @@ function Composer({
   );
 }
 
-function App() {
+function friendlyAuthError(error) {
+  const code = error?.code ?? "";
+  if (code.includes("invalid-credential")) return "Email or password is incorrect.";
+  if (code.includes("email-already-in-use")) return "An account already uses this email.";
+  if (code.includes("weak-password")) return "Use a password with at least six characters.";
+  if (code.includes("invalid-email")) return "Enter a valid email address.";
+  if (code.includes("too-many-requests")) return "Too many attempts. Please wait and retry.";
+  return "Authentication could not be completed. Please try again.";
+}
+
+function AuthScreen({ service }) {
+  const [view, setView] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!email.trim() || (view !== "reset" && !password)) return;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      if (view === "register") {
+        await service.register(email.trim(), password);
+      } else if (view === "reset") {
+        await service.resetPassword(email.trim());
+        setFeedback({ kind: "success", message: "Password reset email sent." });
+      } else {
+        await service.login(email.trim(), password);
+      }
+    } catch (error) {
+      setFeedback({ kind: "error", message: friendlyAuthError(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return h(
+    "main",
+    { className: "auth-page" },
+    h(
+      "section",
+      { className: "auth-card", "aria-labelledby": "auth-title" },
+      h(
+        "div",
+        { className: "auth-brand" },
+        h(
+          "span",
+          { className: "brand-mark", "aria-hidden": "true" },
+          h(Icon, { name: "star-four", weight: "fill" }),
+        ),
+        h("span", null, "Mind"),
+      ),
+      h(
+        "div",
+        { className: "auth-heading" },
+        h(
+          "h1",
+          { id: "auth-title" },
+          view === "register"
+            ? "Create your workspace"
+            : view === "reset"
+              ? "Reset your password"
+              : "Welcome back",
+        ),
+        h(
+          "p",
+          null,
+          view === "register"
+            ? "A private place for conversations and research."
+            : view === "reset"
+              ? "We will send recovery instructions to your email."
+              : "Sign in to continue to your private Mind workspace.",
+        ),
+      ),
+      h(
+        "form",
+        { className: "auth-form", onSubmit: submit },
+        h(
+          "label",
+          null,
+          h("span", null, "Email"),
+          h("input", {
+            type: "email",
+            autoComplete: "email",
+            value: email,
+            onChange: (event) => setEmail(event.target.value),
+            required: true,
+          }),
+        ),
+        view === "reset"
+          ? null
+          : h(
+              "label",
+              null,
+              h("span", null, "Password"),
+              h("input", {
+                type: "password",
+                autoComplete: view === "register" ? "new-password" : "current-password",
+                value: password,
+                onChange: (event) => setPassword(event.target.value),
+                minLength: 6,
+                required: true,
+              }),
+            ),
+        feedback
+          ? h(
+              "p",
+              { className: `auth-feedback ${feedback.kind}`, role: "status" },
+              feedback.message,
+            )
+          : null,
+        h(
+          "button",
+          { className: "auth-submit", type: "submit", disabled: busy },
+          busy
+            ? "Please wait…"
+            : view === "register"
+              ? "Create account"
+              : view === "reset"
+                ? "Send reset email"
+                : "Sign in",
+        ),
+      ),
+      h(
+        "div",
+        { className: "auth-links" },
+        view !== "login"
+          ? h(
+              "button",
+              { type: "button", onClick: () => setView("login") },
+              "Back to sign in",
+            )
+          : h(
+              "button",
+              { type: "button", onClick: () => setView("reset") },
+              "Forgot password?",
+            ),
+        view === "login"
+          ? h(
+              "button",
+              { type: "button", onClick: () => setView("register") },
+              "Create account",
+            )
+          : null,
+      ),
+    ),
+  );
+}
+
+function VerifyEmailScreen({ service, user }) {
+  const [feedback, setFeedback] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function run(action, successMessage) {
+    setBusy(true);
+    setFeedback("");
+    try {
+      await action();
+      setFeedback(successMessage);
+    } catch (error) {
+      setFeedback(friendlyAuthError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return h(
+    "main",
+    { className: "auth-page" },
+    h(
+      "section",
+      { className: "auth-card verification-card" },
+      h("span", { className: "verification-icon" }, h(Icon, { name: "envelope" })),
+      h("h1", null, "Verify your email"),
+      h("p", null, `We sent a verification link to ${user.email}.`),
+      feedback ? h("p", { className: "auth-feedback success" }, feedback) : null,
+      h(
+        "button",
+        {
+          className: "auth-submit",
+          type: "button",
+          disabled: busy,
+          onClick: () => run(() => service.refreshUser(), "Verification status refreshed."),
+        },
+        "I have verified my email",
+      ),
+      h(
+        "div",
+        { className: "auth-links" },
+        h(
+          "button",
+          {
+            type: "button",
+            disabled: busy,
+            onClick: () => run(() => service.resendVerification(), "Verification email sent again."),
+          },
+          "Resend email",
+        ),
+        h("button", { type: "button", onClick: () => service.logout() }, "Sign out"),
+      ),
+    ),
+  );
+}
+
+function App({ authSession }) {
   const [apiState, setApiState] = useState("checking");
   const [mode, setMode] = useState("chat");
   const [input, setInput] = useState("");
@@ -698,12 +952,18 @@ function App() {
   const activeAssistantRef = useRef(null);
   const endRef = useRef(null);
 
+  async function authorizationHeaders(extra = {}) {
+    const token = await authSession.getToken();
+    return { ...extra, Authorization: `Bearer ${token}` };
+  }
+
   async function loadConversations() {
     try {
+      const headers = await authorizationHeaders();
       const [healthResponse, response] = await Promise.all([
         fetch(`${API_BASE}/api/health`),
         fetch(`${API_BASE}/api/conversations`, {
-          headers: { Authorization: `Bearer ${LOCAL_TOKEN}` },
+          headers,
         }),
       ]);
       if (!healthResponse.ok || !response.ok) throw new Error("API unavailable");
@@ -760,7 +1020,7 @@ function App() {
     try {
       const response = await fetch(
         `${API_BASE}/api/conversations/${conversation.id}`,
-        { headers: { Authorization: `Bearer ${LOCAL_TOKEN}` } },
+        { headers: await authorizationHeaders() },
       );
       if (!response.ok) throw new Error("Conversation unavailable");
       const payload = await response.json();
@@ -778,7 +1038,7 @@ function App() {
           try {
             const researchResponse = await fetch(
               `${API_BASE}/api/research/${message.research_job_id}`,
-              { headers: { Authorization: `Bearer ${LOCAL_TOKEN}` } },
+              { headers: await authorizationHeaders() },
             );
             if (!researchResponse.ok) return baseMessage;
             const job = await researchResponse.json();
@@ -830,7 +1090,7 @@ function App() {
 
   async function deleteConversation(conversation) {
     const confirmed = window.confirm(
-      `Delete “${conversation.title}”? All messages in this conversation will be permanently removed. This cannot be undone.`,
+      `Delete “${conversation.title}”? Any active Research task will be stopped and all messages will be permanently removed. This cannot be undone.`,
     );
     if (!confirmed) return;
 
@@ -844,7 +1104,7 @@ function App() {
         `${API_BASE}/api/conversations/${conversation.id}`,
         {
           method: "DELETE",
-          headers: { Authorization: `Bearer ${LOCAL_TOKEN}` },
+          headers: await authorizationHeaders(),
         },
       );
       if (response.status !== 204) throw new Error("Delete failed");
@@ -857,6 +1117,35 @@ function App() {
     } catch {
       setApiState("offline");
       setToast("The conversation could not be deleted.");
+    }
+  }
+
+  async function deleteAccount() {
+    const confirmed = window.confirm(
+      "Delete your Mind account and all conversations and Research jobs? This cannot be undone.",
+    );
+    if (!confirmed) return;
+
+    try {
+      const response = await fetch(`${API_BASE}/api/account`, {
+        method: "DELETE",
+        headers: await authorizationHeaders(),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        if (payload?.error?.code === "recent_authentication_required") {
+          setToast(
+            "For security, sign out and sign in again before deleting your account.",
+          );
+          return;
+        }
+        throw new Error(payload?.error?.message || "Account deletion failed.");
+      }
+      await authSession.logout();
+    } catch (error) {
+      setToast(
+        error.message || "Your account could not be deleted. Please try again.",
+      );
     }
   }
 
@@ -952,11 +1241,10 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}${endpoint}`, {
         method: "POST",
-        headers: {
+        headers: await authorizationHeaders({
           Accept: "text/event-stream",
-          Authorization: `Bearer ${LOCAL_TOKEN}`,
           ...(body ? { "Content-Type": "application/json" } : {}),
-        },
+        }),
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
@@ -967,11 +1255,12 @@ function App() {
     } catch (error) {
       if (error.name !== "AbortError") {
         setApiState("offline");
+        const publicMessage = error.isApiError
+          ? error.message
+          : "Mind could not complete the request. Check the API connection, then try again.";
         updateAssistantMessage(assistantId, (message) => ({
           ...message,
-          content: message.research
-            ? message.content
-            : "Mind could not complete the request. Check the local API and provider settings, then try again.",
+          content: message.research ? message.content || publicMessage : publicMessage,
         }));
         setToast(
           "Connection interrupted. Reopen the conversation to restore the OpenAI research task.",
@@ -1052,7 +1341,7 @@ function App() {
       try {
         const response = await fetch(`${API_BASE}/api/research/${jobId}/cancel`, {
           method: "POST",
-          headers: { Authorization: `Bearer ${LOCAL_TOKEN}` },
+          headers: await authorizationHeaders(),
         });
         if (response.ok && assistantId) {
           updateAssistantMessage(assistantId, (message) => ({
@@ -1131,10 +1420,15 @@ function App() {
       h(Sidebar, {
         conversations,
         activeConversationId: conversationId,
+        currentUser: authSession.user,
         onCollapse: collapseSidebar,
         onNewChat: resetConversation,
         onOpenConversation: openConversation,
         onDeleteConversation: deleteConversation,
+        onDeleteAccount:
+          authService.mode === "firebase" ? deleteAccount : undefined,
+        onSignOut:
+          authService.mode === "firebase" ? () => authSession.logout() : undefined,
       }),
     ),
     h(
@@ -1181,4 +1475,56 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")).render(h(App));
+function ConfigurationError({ message }) {
+  return h(
+    "main",
+    { className: "auth-page" },
+    h(
+      "section",
+      { className: "auth-card verification-card" },
+      h("span", { className: "verification-icon error" }, h(Icon, { name: "warning" })),
+      h("h1", null, "Firebase configuration needed"),
+      h("p", null, message),
+    ),
+  );
+}
+
+function Root() {
+  const [authState, setAuthState] = useState({ loading: true, user: null });
+
+  useEffect(() => {
+    if (!authService.configured) {
+      setAuthState({ loading: false, user: null });
+      return undefined;
+    }
+    return authService.subscribe((user) => {
+      setAuthState({ loading: false, user });
+    });
+  }, []);
+
+  if (!authService.configured) {
+    return h(ConfigurationError, { message: authService.configurationError });
+  }
+  if (authState.loading) {
+    return h("main", { className: "auth-page auth-loading" }, "Opening Mind…");
+  }
+  if (!authState.user) {
+    return h(AuthScreen, { service: authService });
+  }
+  if (authService.requireVerifiedEmail && !authState.user.emailVerified) {
+    return h(VerifyEmailScreen, {
+      service: authService,
+      user: authState.user,
+    });
+  }
+
+  return h(App, {
+    authSession: {
+      user: authState.user,
+      getToken: () => authService.getToken(),
+      logout: () => authService.logout(),
+    },
+  });
+}
+
+createRoot(document.getElementById("root")).render(h(Root));

@@ -154,6 +154,16 @@ class JsonConversationRepository:
             conversations.pop(conversation_index)
             self._write(payload)
 
+    def delete_for_user(self, user_id: str) -> None:
+        with self._lock:
+            payload = self._read()
+            payload["conversations"] = [
+                conversation
+                for conversation in payload["conversations"]
+                if conversation.get("user_id", LOCAL_USER_ID) != user_id
+            ]
+            self._write(payload)
+
     def append_exchange(
         self,
         conversation_id: uuid.UUID | str | None,

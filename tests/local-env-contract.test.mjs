@@ -26,6 +26,9 @@ test("local development loads an optional ignored environment file", async () =>
   assert.doesNotMatch(example, /^OPENAI_API_KEY=.+$/m);
   assert.match(example, /^MIND_RESEARCH_PROVIDER=openai$/m);
   assert.match(example, /^MIND_RESEARCH_MODEL=gpt-5\.6-terra$/m);
+  assert.match(example, /^MIND_AUTH_PROVIDER=local$/m);
+  assert.match(example, /^MIND_PERSISTENCE_PROVIDER=json$/m);
+  assert.match(example, /^MIND_FIRESTORE_DATABASE_ID=\(default\)$/m);
   assert.doesNotMatch(example, /TAVILY_API_KEY|MIND_SEARCH_PROVIDER/);
 });
 
@@ -37,4 +40,23 @@ test("test commands do not load the local billable provider configuration", asyn
   assert.doesNotMatch(packageJson.scripts.test, /env-file/);
   assert.doesNotMatch(packageJson.scripts["test:backend"], /env-file/);
   assert.doesNotMatch(packageJson.scripts["test:all"], /env-file/);
+});
+
+test("staging grants the API Firebase Auth access and mounts model secrets", async () => {
+  const deployScript = await readFile(
+    new URL("../scripts/deploy-staging.mjs", import.meta.url),
+    "utf8",
+  );
+  const terraform = await readFile(
+    new URL("../infra/terraform/main.tf", import.meta.url),
+    "utf8",
+  );
+
+  for (const source of [deployScript, terraform]) {
+    assert.match(source, /identitytoolkit\.googleapis\.com/);
+    assert.match(source, /roles\/firebaseauth\.admin/);
+    assert.match(source, /MIND_FIREBASE_CHECK_REVOKED/);
+  }
+  assert.match(deployScript, /OPENAI_API_KEY=.*:latest/);
+  assert.match(deployScript, /DEEPSEEK_API_KEY=.*:latest/);
 });

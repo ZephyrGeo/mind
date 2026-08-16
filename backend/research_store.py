@@ -45,6 +45,15 @@ class JsonResearchRepository:
             temporary_path = Path(handle.name)
         os.replace(temporary_path, self.file_path)
 
+    def list_jobs(self, user_id: str) -> list[ResearchJob]:
+        with self._lock:
+            jobs = [
+                ResearchJob.model_validate(item)
+                for item in self._read()["research_jobs"]
+                if item.get("user_id") == user_id
+            ]
+        return sorted(jobs, key=lambda job: job.updated_at, reverse=True)
+
     def create_job(self, job: ResearchJob) -> ResearchJob:
         with self._lock:
             payload = self._read()
@@ -128,4 +137,14 @@ class JsonResearchRepository:
             if len(retained) == len(payload["research_jobs"]):
                 return
             payload["research_jobs"] = retained
+            self._write(payload)
+
+    def delete_for_user(self, user_id: str) -> None:
+        with self._lock:
+            payload = self._read()
+            payload["research_jobs"] = [
+                job
+                for job in payload["research_jobs"]
+                if job.get("user_id") != user_id
+            ]
             self._write(payload)

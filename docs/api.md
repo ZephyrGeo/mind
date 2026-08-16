@@ -15,17 +15,19 @@ Interactive documentation is available while the API is running:
 | Method | Path | Authentication | Purpose |
 |---|---|---|---|
 | `GET` | `/api/health` | Public | Runtime, environment, provider, and billing status |
-| `GET` | `/api/conversations` | Local bearer token | Conversation summaries for the current user |
-| `GET` | `/api/conversations/{conversation_id}` | Local bearer token | Full tenant-scoped conversation for reopening and context |
-| `DELETE` | `/api/conversations/{conversation_id}` | Local bearer token | Permanently delete one owned conversation; returns 204 |
-| `POST` | `/api/chat` | Local bearer token | Stream an assistant response using Server-Sent Events |
-| `POST` | `/api/research` | Local bearer token | Create and stream a checkpointed research job |
-| `GET` | `/api/research/{job_id}` | Local bearer token | Refresh one owned job from its saved OpenAI response ID |
-| `POST` | `/api/research/{job_id}/resume` | Local bearer token | Continue its OpenAI Response or explicitly restart a terminal task |
-| `POST` | `/api/research/{job_id}/cancel` | Local bearer token | Cancel a running OpenAI background Response |
+| `GET` | `/api/conversations` | Bearer token | Conversation summaries for the current user |
+| `GET` | `/api/conversations/{conversation_id}` | Bearer token | Full tenant-scoped conversation for reopening and context |
+| `DELETE` | `/api/conversations/{conversation_id}` | Bearer token | Permanently delete one owned conversation; returns 204 |
+| `DELETE` | `/api/account` | Bearer token + recent sign-in | Stop active Research, delete owned data, and delete the Firebase identity |
+| `POST` | `/api/chat` | Bearer token | Stream an assistant response using Server-Sent Events |
+| `POST` | `/api/research` | Bearer token | Create and stream a checkpointed research job |
+| `GET` | `/api/research/{job_id}` | Bearer token | Refresh one owned job from its saved OpenAI response ID |
+| `POST` | `/api/research/{job_id}/resume` | Bearer token | Continue its OpenAI Response or explicitly restart a terminal task |
+| `POST` | `/api/research/{job_id}/cancel` | Bearer token | Cancel a running OpenAI background Response |
 
-The current token is only a local development boundary. It is not production
-authentication and will be replaced by verified Firebase ID tokens.
+Development defaults to a local token. Firebase mode verifies ID tokens in
+FastAPI, optionally requires a verified email, and applies the configured email
+allowlist before any tenant-scoped repository operation.
 
 ## Chat request
 
@@ -154,16 +156,16 @@ The wire format and current model IDs follow the
 [official DeepSeek Chat Completions documentation](https://api-docs.deepseek.com/api/create-chat-completion).
 
 `ConversationRepository` owns tenant-scoped conversation reads and atomic
-exchange writes. `JsonConversationRepository` is the current ignored local
-implementation. The detail endpoint and model-context lookup return the same 404
-for missing and cross-tenant IDs. Firestore can replace the repository without
-changing route handlers.
+exchange writes. `JsonConversationRepository` is the ignored local
+implementation; `FirestoreConversationRepository` stores metadata and ordered
+message subcollections below `users/{uid}`. The detail endpoint and model-context
+lookup return the same 404 for missing and cross-tenant IDs.
 
-`ResearchRepository` persists tenant-scoped jobs separately under
-`work/local-data/research-jobs.json`. Provider response IDs, status, sources,
-citations, and reports are written atomically. Final assistant-message writes
-are idempotent by `research_job_id`, so polling or reconnecting cannot duplicate
-a completed report. Deleting a conversation also deletes its local jobs.
+`ResearchRepository` persists tenant-scoped jobs either in the ignored JSON file
+or below the same Firestore user subtree. Provider response IDs, status, sources,
+citations, and reports are written transactionally. Final assistant-message
+writes are idempotent by `research_job_id`, so polling or reconnecting cannot
+duplicate a completed report.
 
 Milestone-one local JSON records are normalized in memory when read, so older
 conversations that predate typed message IDs and tenant fields remain openable.

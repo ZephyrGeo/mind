@@ -34,12 +34,19 @@ def _csv(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
 class Settings:
     """Validated application settings.
 
-    Staging and production deliberately reject the milestone-one local token.
-    Firebase authentication will replace that token in the next milestone.
+    Staging and production reject local identity and persistence fallbacks.
     """
 
     environment: str = "development"
+    auth_provider: str = "local"
     local_token: str = DEFAULT_LOCAL_TOKEN
+    firebase_project_id: str | None = None
+    allowed_user_emails: tuple[str, ...] = field(default_factory=tuple)
+    require_verified_email: bool = False
+    firebase_check_revoked: bool = True
+    account_deletion_max_auth_age_seconds: int = 600
+    persistence_provider: str = "json"
+    firestore_database_id: str = "(default)"
     data_path: Path = DEFAULT_DATA_PATH
     research_data_path: Path = DEFAULT_RESEARCH_DATA_PATH
     allowed_origins: tuple[str, ...] = field(
@@ -70,6 +77,28 @@ class Settings:
         environment = self.environment.lower()
         if environment not in {"development", "test", "staging", "production"}:
             raise ValueError(f"Unsupported MIND_ENV: {self.environment}")
+        if self.auth_provider not in {"local", "firebase"}:
+            raise ValueError("MIND_AUTH_PROVIDER must be local or firebase.")
+        if self.auth_provider == "firebase" and not (
+            self.firebase_project_id and self.firebase_project_id.strip()
+        ):
+            raise ValueError(
+                "MIND_FIREBASE_PROJECT_ID is required for Firebase authentication."
+            )
+        if self.persistence_provider not in {"json", "firestore"}:
+            raise ValueError(
+                "MIND_PERSISTENCE_PROVIDER must be json or firestore."
+            )
+        if self.persistence_provider == "firestore" and not (
+            self.firebase_project_id and self.firebase_project_id.strip()
+        ):
+            raise ValueError(
+                "MIND_FIREBASE_PROJECT_ID is required for Firestore persistence."
+            )
+        if self.account_deletion_max_auth_age_seconds < 1:
+            raise ValueError(
+                "MIND_ACCOUNT_DELETION_MAX_AUTH_AGE_SECONDS must be positive."
+            )
         if self.max_request_bytes < 1:
             raise ValueError("MIND_MAX_REQUEST_BYTES must be positive.")
         if self.max_context_characters < 1:
@@ -142,9 +171,17 @@ class Settings:
         if self.openai_timeout_seconds <= 0:
             raise ValueError("MIND_OPENAI_TIMEOUT_SECONDS must be positive.")
         if environment in {"staging", "production"}:
-            if self.local_token == DEFAULT_LOCAL_TOKEN:
+            if self.auth_provider != "firebase":
                 raise ValueError(
-                    "The local development token cannot be used outside development or test."
+                    "Firebase authentication is required outside development or test."
+                )
+            if not self.allowed_user_emails:
+                raise ValueError(
+                    "MIND_ALLOWED_USER_EMAILS is required for restricted access."
+                )
+            if self.persistence_provider != "firestore":
+                raise ValueError(
+                    "Firestore persistence is required outside development or test."
                 )
             if not self.allowed_origins:
                 raise ValueError("At least one CORS origin is required.")
@@ -157,7 +194,33 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             environment=os.environ.get("MIND_ENV", "development"),
+            auth_provider=os.environ.get("MIND_AUTH_PROVIDER", "local"),
             local_token=os.environ.get("MIND_LOCAL_TOKEN", DEFAULT_LOCAL_TOKEN),
+            firebase_project_id=os.environ.get("MIND_FIREBASE_PROJECT_ID"),
+            allowed_user_emails=_csv(
+                os.environ.get("MIND_ALLOWED_USER_EMAILS"),
+                (),
+            ),
+            require_verified_email=(
+                os.environ.get("MIND_REQUIRE_VERIFIED_EMAIL", "0") == "1"
+            ),
+            firebase_check_revoked=(
+                os.environ.get("MIND_FIREBASE_CHECK_REVOKED", "1") == "1"
+            ),
+            account_deletion_max_auth_age_seconds=int(
+                os.environ.get(
+                    "MIND_ACCOUNT_DELETION_MAX_AUTH_AGE_SECONDS",
+                    "600",
+                )
+            ),
+            persistence_provider=os.environ.get(
+                "MIND_PERSISTENCE_PROVIDER",
+                "json",
+            ),
+            firestore_database_id=os.environ.get(
+                "MIND_FIRESTORE_DATABASE_ID",
+                "(default)",
+            ),
             data_path=Path(
                 os.environ.get("MIND_DATA_PATH", str(DEFAULT_DATA_PATH))
             ),

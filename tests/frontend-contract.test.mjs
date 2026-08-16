@@ -15,6 +15,7 @@ test("built page contains the Mind product shell", async () => {
 
   assert.match(html, /Mind — Personal AI workspace/);
   assert.match(html, /@phosphor-icons\/web@2\.1\.2/);
+  assert.match(html, /\/runtime-config\.js/);
   assert.match(bundle, /What should we make sense of/);
   assert.match(bundle, /Fake Provider · no model calls · no cloud cost/);
   assert.match(bundle, /DeepSeek Provider · model calls may incur cost/);
@@ -23,6 +24,8 @@ test("built page contains the Mind product shell", async () => {
   assert.match(bundle, /\/api\/conversations\/\$\{conversation\.id\}/);
   assert.match(bundle, /The conversation could not be opened/);
   assert.match(bundle, /Delete conversation/);
+  assert.match(bundle, /Delete account/);
+  assert.match(bundle, /\/api\/account/);
   assert.match(bundle, /method:\s*"DELETE"/);
   assert.match(bundle, /This cannot be undone/);
   assert.match(bundle, /Search conversations/);
@@ -35,7 +38,12 @@ test("built page contains the Mind product shell", async () => {
   assert.match(bundle, /sidebarCollapsed/);
   assert.doesNotMatch(source, /conversations\.slice\(0,\s*5\)/);
   assert.match(bundle, /Authorization/);
+  assert.match(bundle, /Create your workspace/);
+  assert.match(bundle, /Verify your email/);
+  assert.match(bundle, /Password reset email sent/);
   assert.match(bundle, /text\/event-stream/);
+  assert.match(bundle, /error\.isApiError/);
+  assert.match(bundle, /payload\?\.error\?\.message/);
   assert.match(bundle, /\/api\/research/);
   assert.match(bundle, /Resume OpenAI research/);
   assert.match(bundle, /Restart as a new OpenAI task/);

@@ -43,7 +43,19 @@ function selectExport(exportsValue) {
     return exportsValue;
   }
   if (exportsValue && typeof exportsValue === "object") {
-    return exportsValue.browser ?? exportsValue.default;
+    const browserValue = exportsValue.browser;
+    if (typeof browserValue === "string") return browserValue;
+    if (browserValue && typeof browserValue === "object") {
+      if (typeof browserValue.require === "string") return browserValue.require;
+      if (typeof browserValue.default === "string") return browserValue.default;
+    }
+    if (typeof exportsValue.require === "string") return exportsValue.require;
+    if (typeof exportsValue.default === "string") return exportsValue.default;
+    const nodeValue = exportsValue.node;
+    if (nodeValue && typeof nodeValue === "object") {
+      if (typeof nodeValue.require === "string") return nodeValue.require;
+      if (typeof nodeValue.default === "string") return nodeValue.default;
+    }
   }
   return undefined;
 }
@@ -135,6 +147,32 @@ export async function build() {
 
   const bundle = await createBundle(entryFile);
   await writeFile(path.join(outputDirectory, "assets", "app.js"), bundle);
+  const runtimeConfig = {
+    apiBase: process.env.MIND_PUBLIC_API_BASE ?? "http://127.0.0.1:8000",
+    authProvider:
+      process.env.MIND_PUBLIC_AUTH_PROVIDER ??
+      process.env.MIND_AUTH_PROVIDER ??
+      "local",
+    requireVerifiedEmail:
+      (process.env.MIND_PUBLIC_REQUIRE_VERIFIED_EMAIL ??
+        process.env.MIND_REQUIRE_VERIFIED_EMAIL ??
+        "0") === "1",
+    firebaseAuthEmulatorUrl:
+      process.env.MIND_PUBLIC_FIREBASE_AUTH_EMULATOR_URL ?? "",
+    firebase: {
+      apiKey: process.env.MIND_PUBLIC_FIREBASE_API_KEY ?? "",
+      authDomain: process.env.MIND_PUBLIC_FIREBASE_AUTH_DOMAIN ?? "",
+      projectId: process.env.MIND_PUBLIC_FIREBASE_PROJECT_ID ?? "",
+      storageBucket: process.env.MIND_PUBLIC_FIREBASE_STORAGE_BUCKET ?? "",
+      messagingSenderId:
+        process.env.MIND_PUBLIC_FIREBASE_MESSAGING_SENDER_ID ?? "",
+      appId: process.env.MIND_PUBLIC_FIREBASE_APP_ID ?? "",
+    },
+  };
+  await writeFile(
+    path.join(outputDirectory, "runtime-config.js"),
+    `window.__MIND_CONFIG__=${JSON.stringify(runtimeConfig)};\n`,
+  );
   await cp(
     path.join(root, "frontend", "index.html"),
     path.join(outputDirectory, "index.html"),

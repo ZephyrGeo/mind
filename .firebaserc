@@ -1,0 +1,6 @@
+{
+  "projects": {
+    "default": "mind-staging-ce427",
+    "staging": "mind-staging-ce427"
+  }
+}
