@@ -49,6 +49,13 @@ test("built page contains the Mind product shell", async () => {
   assert.match(bundle, /Restart as a new OpenAI task/);
   assert.match(bundle, /research_started/);
   assert.match(bundle, /Research complete/);
+  assert.match(bundle, /Planning research/);
+  assert.match(bundle, /Searching sources/);
+  assert.match(bundle, /Checking evidence/);
+  assert.match(bundle, /Writing report/);
+  assert.match(bundle, /This can take several minutes/);
+  assert.match(bundle, /Used extra search budget/);
+  assert.match(bundle, /Research budget limit reached/);
   assert.match(bundle, /OpenAI ·/);
   assert.match(bundle, /MarkdownContent/);
   assert.match(bundle, /message-link/);
@@ -74,6 +81,8 @@ test("built stylesheet includes responsive and reduced-motion behavior", async (
   assert.match(css, /\.research-progress/);
   assert.match(css, /\.research-source-list/);
   assert.match(css, /\.research-resume/);
+  assert.match(css, /\.research-stage-list/);
+  assert.match(css, /\.research-progress-meta/);
   assert.match(css, /\.markdown-content/);
   assert.match(css, /\.message-link/);
 });

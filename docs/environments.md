@@ -57,7 +57,14 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_OPENAI_BASE_URL` | `https://api.openai.com/v1` | HTTPS Responses API origin; credentials in URLs are rejected |
 | `MIND_RESEARCH_MODEL` | `gpt-5.6-terra` | OpenAI model used for background Research |
 | `MIND_RESEARCH_REASONING_EFFORT` | `high` | Reasoning effort sent with the Responses API request |
-| `MIND_RESEARCH_MAX_TOOL_CALLS` | `12` | Upper bound on built-in web-search tool calls |
+| `MIND_RESEARCH_MAX_TOOL_CALLS` | `12` | Per-Response ceiling; each search worker also receives a fair share of the overall budget |
+| `MIND_RESEARCH_MAX_SEARCH_ROUNDS` | `2` | Maximum evidence-search rounds; accepted range is 1–2 |
+| `MIND_RESEARCH_MAX_SUBQUESTIONS` | `6` | Maximum initial Research Brief subquestions; accepted range is 4–8 |
+| `MIND_RESEARCH_MAX_TOTAL_TOOL_CALLS` | `24` | Whole-job soft web-search tool-call budget across every worker and round |
+| `MIND_RESEARCH_TOOL_CALL_OVERRUN_RATIO` | `0.15` | Maximum proportional overrun considered when computing the hard search limit |
+| `MIND_RESEARCH_MAX_TOOL_CALL_OVERRUN` | `3` | Absolute cap on extra tool calls above the soft budget; the lower ratio-derived value wins |
+| `MIND_RESEARCH_MIN_CITATION_COVERAGE` | `0.8` | Minimum sentence-level factual claim coverage; up to two citation-repair Responses run before a low-coverage report may complete |
+| `MIND_RESEARCH_JOB_TIMEOUT_SECONDS` | `600` | Whole Harness deadline; active Responses are cancelled when exceeded |
 | `MIND_RESEARCH_POLL_INTERVAL_SECONDS` | `2` | Delay between background Response status checks |
 | `MIND_OPENAI_TIMEOUT_SECONDS` | `120` | Timeout for each OpenAI HTTP request |
 | `MIND_LOG_LEVEL` | `INFO` | Structured API log level |

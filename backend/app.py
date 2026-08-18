@@ -304,6 +304,20 @@ def create_app(
         jobs=runtime_research_repository,
         provider=runtime_research_provider,
         poll_interval_seconds=runtime_settings.research_poll_interval_seconds,
+        max_search_rounds=runtime_settings.research_max_search_rounds,
+        max_subquestions=runtime_settings.research_max_subquestions,
+        max_total_tool_calls=runtime_settings.research_max_total_tool_calls,
+        tool_call_overrun_ratio=(
+            runtime_settings.research_tool_call_overrun_ratio
+        ),
+        max_tool_call_overrun=(
+            runtime_settings.research_max_tool_call_overrun
+        ),
+        min_citation_coverage=(
+            runtime_settings.research_min_citation_coverage
+        ),
+        job_timeout_seconds=runtime_settings.research_job_timeout_seconds,
+        max_tool_calls_per_task=runtime_settings.research_max_tool_calls,
         logger=logger,
     )
     application.state.research_service = research_service

@@ -2,15 +2,23 @@
 
 ## Product direction
 
-Mind should not compete with OpenAI on the quality of a single research response.
-OpenAI provides the core long-running reasoning and web exploration. Mind owns the
-personal-agent harness around that capability:
+Mind owns research depth through a durable multi-stage Harness. OpenAI provides
+replaceable model inference, background Responses, and built-in web search; Mind
+plans, fans out, verifies, follows evidence gaps, and synthesizes the result:
 
     Conversation or file input
             ↓
     Relevant user-controlled memory
             ↓
-    OpenAI background Deep Research
+    Research Brief and 4–8 subquestions
+            ↓
+    Parallel Terra + OpenAI Web Search Responses
+            ↓
+    Evidence-gap and conflict verification
+            ↓
+    Optional bounded second search round
+            ↓
+    Unified cited synthesis
             ↓
     Durable job state, citations, sources, and report
             ↓
@@ -35,16 +43,18 @@ automation, evaluation, and user experience.
 
 ### OpenAI owns
 
-- Long-running reasoning.
-- Built-in web search and data exploration.
-- Search planning and follow-up exploration inside a Response.
-- Final research prose.
+- Replaceable model inference for each bounded Harness task.
+- Built-in web search and data exploration for search tasks.
 - Inline URL citations and complete web-source metadata.
-- Background Response execution.
+- Background Response execution, retrieval, and cancellation.
 
 ### Mind owns
 
 - ResearchProvider abstraction.
+- Research Brief generation and subquestion decomposition.
+- Multi-Response fan-out, evidence aggregation, and stage transitions.
+- Evidence-gap and conflict checks plus the optional second search round.
+- Final report synthesis with stable Mind source markers.
 - Authenticated user and tenant boundaries.
 - Research Job lifecycle and durable state machine.
 - OpenAI response ID persistence, retrieval, cancellation, and restart policy.
@@ -55,9 +65,10 @@ automation, evaluation, and user experience.
 - Report snapshots, Memory Ledger, Research Watch, and Insight Diff.
 - Observability, testing, deployment, and security.
 
-Mind will not build a custom search crawler, duplicate OpenAI's internal research
-loop, or offer DeepSeek or Tavily as production Research alternatives. Normal
-Chat may continue using DeepSeek and is outside the Research provider decision.
+Mind will not build a crawler, search index, or alternate production search
+provider. It coordinates OpenAI Web Search through `ResearchProvider` tasks and
+does not depend on a specialized Deep Research model. Normal Chat may continue
+using DeepSeek and is outside the Research provider decision.
 
 ## Assignment acceptance map
 
@@ -90,9 +101,9 @@ The repository already contains a useful local vertical slice:
 - Request IDs, structured errors, and JSON logs.
 - Deterministic backend and frontend tests.
 
-The current Research MVP was originally built around DeepSeek planning and
-synthesis plus Fake or Tavily search. That path is being replaced by a single
-production OpenAIResearchProvider. Fake providers remain test-only.
+The original DeepSeek/Tavily path has been removed. The only production provider
+is `OpenAIResearchProvider`; the Harness itself remains provider-independent and
+tests inject a mock that makes no billable calls.
 
 No broad directory rewrite is required. Existing provider, repository, API,
 conversation, SSE, and frontend boundaries should be evolved incrementally.
@@ -101,12 +112,13 @@ conversation, SSE, and frontend boundaries should be evolved incrementally.
 
 ### 1. ResearchProvider contract
 
-ResearchService depends only on a small interface covering:
+ResearchService depends only on a small interface covering one bounded Harness
+task:
 
-- start a background research Response;
+- start a background Response from a typed task request;
 - retrieve the current provider state by response ID;
 - cancel an active Response;
-- parse the provider result into Mind report, citation, source, and error models.
+- parse output text, citations, sources, tool usage, status, and errors.
 
 The only production implementation is OpenAIResearchProvider.
 
@@ -115,29 +127,34 @@ must not be exposed as a production search option.
 
 ### 2. Durable Research Job state machine
 
-Use a small, explicit state machine:
+Use an explicit Harness state machine:
 
-    created → queued → running → completed
-                     ↘ cancelling → cancelled
-                     ↘ failed
+    queued → planning → collecting → verifying → synthesizing → completed
+                         ↑              │
+                         └ second round ┘
+    any active phase → failed or cancelled
 
-A restarted cancelled or terminally failed job creates a new provider attempt.
-The new attempt is linked to the previous attempt instead of pretending that the
-original OpenAI Response continued.
+Planning creates a Research Brief with 4–8 questions. Collecting starts one
+background Web Search Response per question. Verification identifies conflicts
+and material evidence gaps. At most one follow-up search round runs before final
+synthesis. A restarted cancelled run archives all prior response IDs instead of
+pretending that the original Responses continued.
 
 Each Research Job stores at least:
 
 - job ID;
 - user ID and conversation ID;
-- provider and model;
-- provider response ID;
+- model and prompt version;
+- overall search-round, tool-call, and timeout budget;
+- Research Brief and verification result;
+- every subtask's kind, round, question, response ID, provider status, output,
+  sources, citations, tool usage, error, and timestamps;
+- compatibility pointer to the most recently active provider response ID;
 - status and provider status;
-- attempt number and retry-of reference;
-- input file and memory references;
-- prompt version;
+- archived response IDs from restarted attempts;
+- global source ledger, final citation map, and final report;
 - timestamps;
-- normalized error code and safe message;
-- report ID when completed.
+- normalized error code and safe message.
 
 ### 3. Disconnect and cancellation semantics
 
@@ -156,34 +173,35 @@ The cancellation flow is:
 
     POST /api/research/{job_id}/cancel
     → verify ownership and cancellable state
-    → call OpenAI cancel
-    → persist cancelling
-    → retrieve the provider terminal state
+    → enumerate every queued/running subtask response ID
+    → call OpenAI cancel for each active Response
     → persist cancelled
 
 Logout alone does not cancel Research.
 
-The server must persist the provider response ID before emitting the first
-research-started SSE event. A disconnected browser later retrieves the same
-Response by that ID instead of creating a duplicate task.
+The server persists each provider response ID immediately after `start` returns
+and before further polling or starting later phases. A disconnected browser
+retrieves every saved Response by ID; GET refresh never creates provider work.
 
 ### 4. Background reconciliation
 
-OpenAI executes the reasoning, but Mind still needs a durable reconciler:
+OpenAI executes each task, but Mind owns the durable reconciler:
 
     POST /api/research
     → create Firestore Research Job
-    → create OpenAI background Response
-    → save response ID
+    → create and save the Brief Response ID
+    → parse Brief and fan out search Responses
+    → save every subtask Response ID
     → enqueue Cloud Task
-    → retrieve until terminal
-    → save report, citations, and sources
+    → retrieve until each phase is terminal
+    → verify evidence and optionally fan out round two
+    → synthesize and save report, citations, and sources
 
 Frontend polling may opportunistically refresh a job, but production completion
 must not depend on the browser remaining open.
 
-Cloud Task execution is idempotent. A retry retrieves the existing Response and
-does not call start again.
+Cloud Task execution is idempotent. A retry retrieves every subtask with a saved
+response ID and starts only pending tasks that have never reached the provider.
 
 ### 5. Context and input assembly
 
@@ -220,10 +238,12 @@ Inline citations and source links must be clearly visible and clickable.
 
 Enforce:
 
+- at most two search rounds;
+- 4–8 Brief subquestions, with six as the default cap;
+- a whole-job web-search tool-call budget;
+- a whole-job timeout that cancels still-running Responses;
 - maximum active Research jobs per user;
 - daily Research quota;
-- maximum OpenAI tool calls;
-- maximum local reconciliation duration;
 - bounded provider polling with backoff;
 - file size, type, and extracted-text limits;
 - idempotency keys;
@@ -426,8 +446,11 @@ Estimated effort: 1–2 days
 - Preserve the current passing test baseline.
 - Define ResearchProvider.
 - Implement the sole production OpenAIResearchProvider.
-- Use the Responses API with background execution and built-in web search.
-- Persist response ID and map provider states.
+- Use Responses background mode for every bounded stage and enable built-in web
+  search only for evidence workers.
+- Generate a Research Brief, fan out 4–8 subquestions, verify evidence, run at
+  most one follow-up round, and synthesize with stable source markers.
+- Persist every subtask response ID and map provider states.
 - Implement retrieve, cancel, parsing, and safe error mapping.
 - Parse output text, inline citations, and complete sources.
 - Remove Research-specific DeepSeek, Tavily, and Fake production configuration.
@@ -436,8 +459,12 @@ Estimated effort: 1–2 days
 
 Exit criteria:
 
-- Research runs, reconnects, completes, fails safely, and cancels.
-- Browser disconnect does not recreate or cancel the OpenAI Response.
+- Research runs, reconnects, completes, fails safely, and cancels every active
+  Response.
+- Browser disconnect does not recreate or cancel saved OpenAI Responses.
+- Budgets cap rounds, subquestions, total web-search calls, and wall time.
+- Deterministic quality metrics cover sources, authority, citation coverage,
+  conflict detection, and expected facts.
 - Every completion produces one persisted assistant message.
 - No real API key is needed for the required test suite.
 
@@ -602,7 +629,7 @@ Prioritize in this order:
 
 Defer if time is limited:
 
-- custom search, crawling, or Research planning loops;
+- custom crawling, indexing, or non-OpenAI search infrastructure;
 - Research-specific DeepSeek or Tavily providers;
 - multiple production Research providers;
 - voice after file upload works;
@@ -639,8 +666,11 @@ Required deterministic tests:
 - OpenAI state mapping;
 - citation and source normalization;
 - Research Job state transitions;
+- Brief decomposition into 4–8 bounded subquestions;
+- parallel response-ID persistence and refresh recovery;
+- evidence-gap-driven second-round behavior and whole-job budgets;
 - browser disconnect recovery;
-- explicit cancellation;
+- explicit cancellation of every active subtask;
 - cancelled and failed restart behavior;
 - idempotent start and finalize;
 - duplicate assistant-message prevention;
@@ -654,6 +684,8 @@ Required deterministic tests:
 Staging tests:
 
 - minimal real OpenAI smoke test when a key is available;
+- Research quality comparison for source count, authoritative-source ratio,
+  citation coverage, conflict detection, and expected-fact correctness;
 - Auth and restricted-access journey;
 - upload-to-Research journey;
 - browser close and later recovery;

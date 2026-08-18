@@ -15,14 +15,21 @@ const authService = createAuthService(RUNTIME_CONFIG, LOCAL_TOKEN);
 
 const researchStatusLabels = {
   queued: "Queued",
-  planning: "Planning the investigation",
-  collecting: "Collecting web evidence",
-  verifying: "Checking and organizing sources",
-  synthesizing: "Writing the cited report",
+  planning: "Planning research",
+  collecting: "Searching sources",
+  verifying: "Checking evidence",
+  synthesizing: "Writing report",
   completed: "Research complete",
   failed: "Research paused after an error",
   cancelled: "Research stopped",
 };
+
+const researchStages = [
+  { status: "planning", label: "Plan" },
+  { status: "collecting", label: "Search" },
+  { status: "verifying", label: "Verify" },
+  { status: "synthesizing", label: "Write" },
+];
 
 const navigation = [
   { icon: "chat-circle", label: "Chat", active: true },
@@ -463,6 +470,37 @@ function ResearchProgress({ research, onResume }) {
   const progress = Math.round((research.progress ?? 0) * 100);
   const canResume = ["failed", "cancelled"].includes(research.status);
   const sources = research.sources ?? [];
+  const stageIndex = researchStages.findIndex(
+    (stage) => stage.status === research.status,
+  );
+  const currentStage = research.status === "queued" ? 0 : stageIndex;
+  const completedAll = research.status === "completed";
+  const active = !["completed", "failed", "cancelled"].includes(research.status);
+  const taskSummary =
+    research.totalSubtasks > 0
+      ? `${research.completedSubtasks ?? 0}/${research.totalSubtasks} tasks`
+      : null;
+  const roundSummary =
+    research.searchRound > 0
+      ? `round ${research.searchRound}/${research.maxSearchRounds ?? 2}`
+      : null;
+  const toolSummary =
+    research.maxTotalToolCalls > 0
+      ? `${research.totalToolCalls ?? 0}/${research.maxTotalToolCalls} searches`
+      : null;
+  const hardMaxTotalToolCalls =
+    research.hardMaxTotalToolCalls ??
+    ((research.maxTotalToolCalls ?? 0) +
+      (research.maxToolCallOverrun ?? 0));
+  const hardBudgetReached =
+    research.hardBudgetReached ||
+    (hardMaxTotalToolCalls > 0 &&
+      (research.totalToolCalls ?? 0) >= hardMaxTotalToolCalls);
+  const budgetWarning = hardBudgetReached
+    ? `Research budget limit reached (${research.totalToolCalls ?? 0}/${hardMaxTotalToolCalls}); search stopped and synthesis is limited to the evidence collected.`
+    : research.budgetExceeded
+      ? `Used extra search budget (${research.totalToolCalls ?? 0}/${research.maxTotalToolCalls}); no new searches will be started.`
+      : null;
 
   return h(
     "section",
@@ -490,6 +528,46 @@ function ResearchProgress({ research, onResume }) {
         "aria-valuenow": progress,
       },
       h("span", { style: { width: `${progress}%` } }),
+    ),
+    h(
+      "ol",
+      { className: "research-stage-list", "aria-label": "Research stages" },
+      researchStages.map((stage, index) =>
+        h(
+          "li",
+          {
+            key: stage.status,
+            className: `${
+              completedAll || index < currentStage
+                ? "completed"
+                : index === currentStage
+                  ? "active"
+                  : "pending"
+            }`,
+          },
+          h("span", null, index + 1),
+          stage.label,
+        ),
+      ),
+    ),
+    h(
+      "div",
+      { className: "research-progress-meta" },
+      h(
+        "span",
+        null,
+        [roundSummary, taskSummary, toolSummary].filter(Boolean).join(" · ") ||
+          "Preparing the Research Brief",
+      ),
+      budgetWarning
+        ? h(
+            "span",
+            { className: "research-budget-warning" },
+            budgetWarning,
+          )
+        : active
+          ? h("span", null, "This can take several minutes.")
+          : null,
     ),
     sources.length
       ? h(
@@ -1053,6 +1131,20 @@ function App({ authSession }) {
                 providerStatus: job.provider_status,
                 sources: job.checkpoint.sources,
                 citations: job.checkpoint.citations,
+                searchRound: job.search_round,
+                maxSearchRounds: job.budget?.max_search_rounds,
+                completedSubtasks: (job.checkpoint.subtasks ?? []).filter(
+                  (task) => task.status === "completed",
+                ).length,
+                totalSubtasks: (job.checkpoint.subtasks ?? []).length,
+                totalToolCalls: job.total_tool_calls,
+                maxTotalToolCalls: job.budget?.max_total_tool_calls,
+                maxToolCallOverrun: job.budget?.max_tool_call_overrun,
+                hardMaxTotalToolCalls:
+                  (job.budget?.max_total_tool_calls ?? 0) +
+                  (job.budget?.max_tool_call_overrun ?? 0),
+                budgetExceeded: job.budget_exceeded,
+                hardBudgetReached: job.hard_budget_reached,
               },
             };
           } catch {
@@ -1169,6 +1261,16 @@ function App({ authSession }) {
           status: event.status,
           progress: event.progress,
           restarted: event.restarted,
+          searchRound: event.search_round,
+          maxSearchRounds: event.max_search_rounds,
+          completedSubtasks: event.completed_subtasks,
+          totalSubtasks: event.total_subtasks,
+          totalToolCalls: event.total_tool_calls,
+          maxTotalToolCalls: event.max_total_tool_calls,
+          maxToolCallOverrun: event.max_tool_call_overrun,
+          hardMaxTotalToolCalls: event.hard_max_total_tool_calls,
+          budgetExceeded: event.budget_exceeded,
+          hardBudgetReached: event.hard_budget_reached,
         },
       }));
       if (event.restarted) {
@@ -1183,6 +1285,16 @@ function App({ authSession }) {
           jobId: event.job_id,
           status: event.status,
           progress: event.progress,
+          searchRound: event.search_round,
+          maxSearchRounds: event.max_search_rounds,
+          completedSubtasks: event.completed_subtasks,
+          totalSubtasks: event.total_subtasks,
+          totalToolCalls: event.total_tool_calls,
+          maxTotalToolCalls: event.max_total_tool_calls,
+          maxToolCallOverrun: event.max_tool_call_overrun,
+          hardMaxTotalToolCalls: event.hard_max_total_tool_calls,
+          budgetExceeded: event.budget_exceeded,
+          hardBudgetReached: event.hard_budget_reached,
         },
       }));
     }
@@ -1214,6 +1326,21 @@ function App({ authSession }) {
               status: event.status ?? "completed",
               progress: 1,
               citations: event.citations ?? [],
+              totalToolCalls:
+                event.total_tool_calls ?? message.research.totalToolCalls,
+              maxTotalToolCalls:
+                event.max_total_tool_calls ?? message.research.maxTotalToolCalls,
+              maxToolCallOverrun:
+                event.max_tool_call_overrun ??
+                message.research.maxToolCallOverrun,
+              hardMaxTotalToolCalls:
+                event.hard_max_total_tool_calls ??
+                message.research.hardMaxTotalToolCalls,
+              budgetExceeded:
+                event.budget_exceeded ?? message.research.budgetExceeded,
+              hardBudgetReached:
+                event.hard_budget_reached ??
+                message.research.hardBudgetReached,
             }
           : message.research,
       }));

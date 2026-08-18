@@ -21,9 +21,9 @@ Interactive documentation is available while the API is running:
 | `DELETE` | `/api/account` | Bearer token + recent sign-in | Stop active Research, delete owned data, and delete the Firebase identity |
 | `POST` | `/api/chat` | Bearer token | Stream an assistant response using Server-Sent Events |
 | `POST` | `/api/research` | Bearer token | Create and stream a checkpointed research job |
-| `GET` | `/api/research/{job_id}` | Bearer token | Refresh one owned job from its saved OpenAI response ID |
-| `POST` | `/api/research/{job_id}/resume` | Bearer token | Continue its OpenAI Response or explicitly restart a terminal task |
-| `POST` | `/api/research/{job_id}/cancel` | Bearer token | Cancel a running OpenAI background Response |
+| `GET` | `/api/research/{job_id}` | Bearer token | Refresh one owned job from its saved subtask response IDs without starting work |
+| `POST` | `/api/research/{job_id}/resume` | Bearer token | Continue saved Responses or explicitly restart terminal provider tasks |
+| `POST` | `/api/research/{job_id}/cancel` | Bearer token | Cancel every running OpenAI background Response in the job |
 
 Development defaults to a local token. Firebase mode verifies ID tokens in
 FastAPI, optionally requires a verified email, and applies the configured email
@@ -54,30 +54,40 @@ size metadata; no file content is uploaded yet.
 }
 ```
 
-A new job first persists the user message and conversation ID, then starts an
-OpenAI Responses API request with `background: true`, built-in `web_search`, and
-complete web sources included. DeepSeek Chat is not part of this workflow.
+A new job persists the user message and conversation ID, then Mind runs a
+multi-stage Research Harness:
+
+1. Terra creates a structured Research Brief with 4–8 subquestions.
+2. Each subquestion gets its own background Response with built-in `web_search`.
+3. Terra checks the aggregated evidence for gaps and conflicts without searching.
+4. Material gaps trigger one bounded second round of search workers.
+5. Terra writes one report using Mind's stable `[S#]` source markers.
+
+Every stage is a provider-independent subtask with its own response ID, status,
+output, sources, citations, and tool usage. DeepSeek Chat is not part of this
+workflow.
 
 Research SSE frames are ordered but not every type occurs exactly once:
 
 ```text
 data: {"type":"research_started","job_id":"...","conversation_id":"...","status":"queued","progress":0}
 
-data: {"type":"status","job_id":"...","status":"collecting","provider_status":"in_progress","progress":0.55}
+data: {"type":"status","job_id":"...","status":"collecting","provider_status":"in_progress","progress":0.42,"search_round":1,"max_search_rounds":2,"completed_subtasks":3,"total_subtasks":5,"total_tool_calls":4,"max_total_tool_calls":24,"max_tool_call_overrun":3,"hard_max_total_tool_calls":27,"budget_exceeded":false,"hard_budget_reached":false,"citation_coverage":null}
 
 data: {"type":"source","job_id":"...","source":{"id":"S1","title":"...","url":"https://..."}}
 
 data: {"type":"delta","job_id":"...","delta":"## Findings"}
 
-data: {"type":"done","job_id":"...","conversation_id":"...","status":"completed","progress":1,"source_count":8,"citations":[{"source_id":"S1","url":"https://...","start_index":41,"end_index":44}]}
+data: {"type":"done","job_id":"...","conversation_id":"...","status":"completed","progress":1,"source_count":8,"citation_coverage":0.92,"citations":[{"source_id":"S1","url":"https://...","start_index":41,"end_index":44}]}
 ```
 
 OpenAI `queued`, `in_progress`, `completed`, `failed`/`incomplete`, and
-`cancelled` states map onto the persisted Mind job. The OpenAI `response_id` is
-saved before polling, so a browser disconnect or page reload retrieves the same
-background Response instead of starting a duplicate. User cancellation calls
-the OpenAI cancel endpoint. Restarting a cancelled task creates a new Response
-and archives the previous response ID on the Mind job.
+`cancelled` states map onto persisted Mind subtasks and the enclosing phase.
+Response IDs are saved per subtask before further polling, so a browser
+disconnect or page reload retrieves existing Responses instead of starting
+duplicates. User cancellation calls the OpenAI cancel endpoint for every active
+subtask. Restarting a cancelled job begins a fresh Harness run and archives all
+previous response IDs.
 
 ## Streaming response
 
@@ -137,20 +147,24 @@ keeps the newest turns that fit `MIND_MAX_CONTEXT_CHARACTERS`, and sends them in
 user/assistant order before the new user message. The limit includes the new
 message and prevents history from growing model cost without bound.
 
-`ResearchProvider` owns start, retrieve, cancel, and result parsing. The sole
-production implementation is `OpenAIResearchProvider`; tests inject a mock at
-the same boundary. It uses the Responses API with `gpt-5.6-terra`, background
-mode, and built-in web search. Parsed output includes final `output_text`, URL
-citation annotations, and the complete `web_search_call.action.sources` list.
+`ResearchProvider` owns start, retrieve, cancel, and result parsing for one
+bounded subtask. The sole production implementation is
+`OpenAIResearchProvider`; tests inject a mock at the same boundary. It uses the
+Responses API with a configurable model (default `gpt-5.6-terra`) and background
+mode. Only search subtasks enable built-in web search. Parsed search output
+includes `output_text`, URL citation annotations, and the complete
+`web_search_call.action.sources` list.
 The frontend renders inline citations and source cards as external links. See
 OpenAI's official [background mode](https://developers.openai.com/api/docs/guides/background),
 [web search](https://developers.openai.com/api/docs/guides/tools-web-search), and
 [GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
 documentation for the upstream contract.
 
-`ResearchService` owns persistence, provider-status mapping, polling, SSE
-progress, cancellation, refresh recovery, and idempotent assistant-message
-writes. It depends only on `ResearchProvider`, not on an SDK or concrete client.
+`ResearchService` owns Brief planning, parallel subquestions, evidence-gap and
+conflict checks, the optional second search round, final synthesis, overall
+budgets, persistence, polling, SSE progress, cancel-all, refresh recovery, and
+idempotent assistant-message writes. It depends only on `ResearchProvider`, not
+on an SDK, concrete client, or a specialized Deep Research model.
 
 The wire format and current model IDs follow the
 [official DeepSeek Chat Completions documentation](https://api-docs.deepseek.com/api/create-chat-completion).
@@ -162,10 +176,11 @@ message subcollections below `users/{uid}`. The detail endpoint and model-contex
 lookup return the same 404 for missing and cross-tenant IDs.
 
 `ResearchRepository` persists tenant-scoped jobs either in the ignored JSON file
-or below the same Firestore user subtree. Provider response IDs, status, sources,
-citations, and reports are written transactionally. Final assistant-message
-writes are idempotent by `research_job_id`, so polling or reconnecting cannot
-duplicate a completed report.
+or below the same Firestore user subtree. Every subtask response ID, status,
+output, source list, citation list, and tool usage is stored in the checkpoint;
+the unified report and global source ledger live beside it. Final
+assistant-message writes are idempotent by `research_job_id`, so polling or
+reconnecting cannot duplicate a completed report.
 
 Milestone-one local JSON records are normalized in memory when read, so older
 conversations that predate typed message IDs and tenant fields remain openable.

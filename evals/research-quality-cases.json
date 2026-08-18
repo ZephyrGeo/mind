@@ -1,0 +1,27 @@
+[
+  {
+    "id": "background-mode-limits",
+    "prompt": "Research the documented limitations of OpenAI Responses API background mode.",
+    "expected_facts": [
+      "background responses can be polled by response id",
+      "background responses can be cancelled"
+    ],
+    "expected_conflicts": [],
+    "minimum_source_count": 2,
+    "minimum_authoritative_source_ratio": 0.5,
+    "minimum_citation_coverage": 0.8,
+    "minimum_factual_correctness": 0.8
+  },
+  {
+    "id": "conflicting-current-claims",
+    "prompt": "Compare conflicting current claims and identify which source is authoritative.",
+    "expected_facts": [],
+    "expected_conflicts": [
+      "material source disagreement must be explicitly identified"
+    ],
+    "minimum_source_count": 3,
+    "minimum_authoritative_source_ratio": 0.34,
+    "minimum_citation_coverage": 0.8,
+    "minimum_conflict_detection_rate": 1.0
+  }
+]
