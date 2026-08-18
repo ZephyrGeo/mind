@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
@@ -14,12 +14,14 @@ from .research_provider import (
     ProviderCitation,
     ProviderSource,
     ResearchProviderError,
+    ResearchProviderRequest,
     ResearchProviderResult,
 )
+from .source_urls import canonical_source_url
 
 
 class OpenAIResearchProvider:
-    """Run one background Response with OpenAI's built-in web search tool."""
+    """Run one bounded background task for Mind's Research Harness."""
 
     name = "openai"
     billable_calls = True
@@ -73,33 +75,27 @@ class OpenAIResearchProvider:
         self.max_response_bytes = max_response_bytes
         self._opener = opener
 
-    def start(self, query: str) -> Mapping[str, Any]:
-        prompt = (
-            "Research the user's question thoroughly using current web sources. "
-            "Write a self-contained, analytical report that distinguishes established "
-            "facts from uncertainty or disagreement. Prefer primary and authoritative "
-            "sources, include concrete dates and figures when relevant, and preserve "
-            "the inline citations supplied by the web search tool. Do not manually "
-            "repeat raw source URLs, duplicate citation links, or add a separate "
-            "sources section; Mind renders citations and the complete source list "
-            "from the structured response metadata.\n\nUser question:\n"
-            f"{query}"
-        )
-        return self._request(
-            "POST",
-            "/responses",
-            {
-                "model": self.model,
-                "input": prompt,
-                "background": True,
-                "store": True,
-                "tools": [{"type": "web_search"}],
-                "tool_choice": "auto",
-                "include": ["web_search_call.action.sources"],
-                "reasoning": {"effort": self.reasoning_effort},
-                "max_tool_calls": self.max_tool_calls,
-            },
-        )
+    def start(self, request: ResearchProviderRequest) -> Mapping[str, Any]:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "input": request.prompt,
+            "background": True,
+            "store": True,
+            "reasoning": {"effort": self.reasoning_effort},
+        }
+        if request.use_web_search:
+            body.update(
+                {
+                    "tools": [{"type": "web_search"}],
+                    "tool_choice": "auto",
+                    "include": ["web_search_call.action.sources"],
+                    "max_tool_calls": max(
+                        1,
+                        min(request.max_tool_calls, self.max_tool_calls),
+                    ),
+                }
+            )
+        return self._request("POST", "/responses", body)
 
     def retrieve(self, response_id: str) -> Mapping[str, Any]:
         return self._request("GET", f"/responses/{quote(response_id, safe='')}")
@@ -123,17 +119,20 @@ class OpenAIResearchProvider:
         citations: list[ProviderCitation] = []
         sources: list[ProviderSource] = []
         source_urls: set[str] = set()
+        tool_call_count = 0
         output = response.get("output")
         if isinstance(output, list):
-            for item in output:
-                if not isinstance(item, Mapping):
+            for raw_item in cast(list[object], output):
+                item = _object_mapping(raw_item)
+                if item is None:
                     continue
                 if item.get("type") == "web_search_call":
-                    action = item.get("action")
-                    if isinstance(action, Mapping):
+                    tool_call_count += 1
+                    action = _object_mapping(item.get("action"))
+                    if action is not None:
                         raw_sources = action.get("sources")
                         if isinstance(raw_sources, list):
-                            for raw_source in raw_sources:
+                            for raw_source in cast(list[object], raw_sources):
                                 source = _parse_source(raw_source)
                                 if source is None or source.url in source_urls:
                                     continue
@@ -144,8 +143,9 @@ class OpenAIResearchProvider:
                 content = item.get("content")
                 if not isinstance(content, list):
                     continue
-                for content_item in content:
-                    if not isinstance(content_item, Mapping):
+                for raw_content_item in cast(list[object], content):
+                    content_item = _object_mapping(raw_content_item)
+                    if content_item is None:
                         continue
                     if content_item.get("type") != "output_text":
                         continue
@@ -159,7 +159,7 @@ class OpenAIResearchProvider:
                     annotations = content_item.get("annotations")
                     if not isinstance(annotations, list):
                         continue
-                    for annotation in annotations:
+                    for annotation in cast(list[object], annotations):
                         citation = _parse_citation(annotation, offset=offset)
                         if citation is not None:
                             citations.append(citation)
@@ -184,6 +184,7 @@ class OpenAIResearchProvider:
             error_code=error_code,
             public_message=public_message,
             retryable=retryable,
+            tool_call_count=tool_call_count,
         )
 
     def _request(
@@ -244,27 +245,35 @@ class OpenAIResearchProvider:
             raise _invalid_response_error() from None
         if not isinstance(payload, Mapping):
             raise _invalid_response_error()
-        return payload
+        return cast(Mapping[str, Any], payload)
 
 
 def _parse_source(value: object) -> ProviderSource | None:
-    if not isinstance(value, Mapping):
+    payload = _object_mapping(value)
+    if payload is None:
         return None
-    url = value.get("url")
+    url = payload.get("url")
     if not isinstance(url, str) or not _is_public_web_url(url):
         return None
-    title = value.get("title")
+    canonical_url = canonical_source_url(url)
+    if not canonical_url:
+        return None
+    title = payload.get("title")
     return ProviderSource(
-        url=url,
-        title=title.strip() if isinstance(title, str) and title.strip() else url,
+        url=canonical_url,
+        title=(
+            title.strip()
+            if isinstance(title, str) and title.strip()
+            else canonical_url
+        ),
     )
 
 
 def _parse_citation(value: object, *, offset: int) -> ProviderCitation | None:
-    if not isinstance(value, Mapping) or value.get("type") != "url_citation":
+    annotation = _object_mapping(value)
+    if annotation is None or annotation.get("type") != "url_citation":
         return None
-    nested = value.get("url_citation")
-    payload = nested if isinstance(nested, Mapping) else value
+    payload = _object_mapping(annotation.get("url_citation")) or annotation
     url = payload.get("url")
     title = payload.get("title")
     start_index = payload.get("start_index")
@@ -278,9 +287,16 @@ def _parse_citation(value: object, *, offset: int) -> ProviderCitation | None:
         or end_index <= start_index
     ):
         return None
+    canonical_url = canonical_source_url(url)
+    if not canonical_url:
+        return None
     return ProviderCitation(
-        url=url,
-        title=title.strip() if isinstance(title, str) and title.strip() else url,
+        url=canonical_url,
+        title=(
+            title.strip()
+            if isinstance(title, str) and title.strip()
+            else canonical_url
+        ),
         start_index=offset + start_index,
         end_index=offset + end_index,
     )
@@ -293,12 +309,14 @@ def _response_failure(
     if status in {"queued", "in_progress", "completed"}:
         return None, None, False
     error = response.get("error")
-    provider_code = error.get("code") if isinstance(error, Mapping) else None
+    error_payload = _object_mapping(error)
+    provider_code = error_payload.get("code") if error_payload else None
     if status in {"cancelled", "canceled"}:
         return "research_cancelled", "Research was cancelled.", False
     if status == "incomplete":
         details = response.get("incomplete_details")
-        reason = details.get("reason") if isinstance(details, Mapping) else None
+        details_payload = _object_mapping(details)
+        reason = details_payload.get("reason") if details_payload else None
         code = f"research_incomplete_{reason}" if isinstance(reason, str) else "research_incomplete"
         return code, "OpenAI Research ended before producing a complete report.", True
     code = (
@@ -307,6 +325,12 @@ def _response_failure(
         else "research_provider_failed"
     )
     return code, "OpenAI Research could not complete the report.", True
+
+
+def _object_mapping(value: object) -> Mapping[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return cast(Mapping[str, object], value)
 
 
 def _is_public_web_url(value: str) -> bool:

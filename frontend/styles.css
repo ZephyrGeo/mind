@@ -1033,6 +1033,64 @@ input:focus-visible {
   transition: width 220ms ease;
 }
 
+.research-stage-list {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.research-stage-list li {
+  align-items: center;
+  color: #a29c93;
+  display: flex;
+  font-size: 10px;
+  font-weight: 650;
+  gap: 5px;
+}
+
+.research-stage-list li > span {
+  align-items: center;
+  border: 1px solid #dcd6cd;
+  border-radius: 999px;
+  display: inline-flex;
+  height: 17px;
+  justify-content: center;
+  width: 17px;
+}
+
+.research-stage-list li.active,
+.research-stage-list li.completed {
+  color: #4b4741;
+}
+
+.research-stage-list li.active > span {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.research-stage-list li.completed > span {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.research-progress-meta {
+  color: #89837a;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 10px;
+  gap: 5px 14px;
+  justify-content: space-between;
+}
+
+.research-budget-warning {
+  color: #a34a2a;
+  font-weight: 650;
+}
+
 .research-sources {
   border-top: 1px solid #e6e1d9;
   display: grid;

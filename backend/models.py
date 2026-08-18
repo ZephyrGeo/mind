@@ -50,6 +50,23 @@ class ResearchStepStatus(str, Enum):
     FAILED = "failed"
 
 
+class ResearchTaskKind(str, Enum):
+    BRIEF = "brief"
+    SEARCH = "search"
+    VERIFY = "verify"
+    SYNTHESIS = "synthesis"
+    CITATION_REPAIR = "citation_repair"
+
+
+class ResearchTaskStatus(str, Enum):
+    PENDING = "pending"
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class ToolCallStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -153,10 +170,73 @@ class ResearchCitation(StrictModel):
     end_index: int = Field(gt=0)
 
 
+class ResearchBriefQuestion(StrictModel):
+    id: str = Field(min_length=1, max_length=32)
+    question: str = Field(min_length=1, max_length=1_000)
+    objective: str = Field(min_length=1, max_length=1_000)
+
+
+class ResearchBrief(StrictModel):
+    objective: str = Field(min_length=1, max_length=2_000)
+    scope: list[str] = Field(default_factory=list[str], max_length=12)
+    assumptions: list[str] = Field(default_factory=list[str], max_length=12)
+    success_criteria: list[str] = Field(default_factory=list[str], max_length=12)
+    subquestions: list[ResearchBriefQuestion] = Field(min_length=4, max_length=8)
+
+
+class ResearchEvidenceGap(StrictModel):
+    id: str = Field(min_length=1, max_length=32)
+    question: str = Field(min_length=1, max_length=1_000)
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
+class ResearchVerification(StrictModel):
+    summary: str = Field(default="", max_length=4_000)
+    conflicts: list[str] = Field(default_factory=list[str], max_length=20)
+    gaps: list[ResearchEvidenceGap] = Field(
+        default_factory=list[ResearchEvidenceGap],
+        max_length=8,
+    )
+    coverage_notes: list[str] = Field(default_factory=list[str], max_length=20)
+
+
+class ResearchBudget(StrictModel):
+    max_search_rounds: int = Field(default=2, ge=1, le=2)
+    max_subquestions: int = Field(default=6, ge=4, le=8)
+    max_total_tool_calls: int = Field(default=24, ge=1, le=100)
+    max_tool_call_overrun: int = Field(default=3, ge=0, le=20)
+    timeout_seconds: int = Field(default=600, ge=60, le=3_600)
+
+
+class ResearchSubtask(StrictModel):
+    id: str = Field(min_length=1, max_length=64)
+    kind: ResearchTaskKind
+    round_index: int = Field(default=0, ge=0, le=2)
+    subquestion_id: str | None = Field(default=None, max_length=32)
+    question: str = Field(min_length=1, max_length=2_000)
+    objective: str = Field(default="", max_length=2_000)
+    status: ResearchTaskStatus = ResearchTaskStatus.PENDING
+    response_id: str | None = None
+    provider_status: str | None = None
+    output_text: str = ""
+    sources: list[ResearchSource] = Field(default_factory=list[ResearchSource])
+    citations: list[ResearchCitation] = Field(
+        default_factory=list[ResearchCitation]
+    )
+    tool_call_limit: int = Field(default=0, ge=0, le=100)
+    tool_call_count: int = Field(default=0, ge=0, le=100)
+    error_code: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class ResearchCheckpoint(StrictModel):
-    # Legacy plan fields stay readable, but OpenAI Research persists only the
-    # response ID, sources, citations, report, and assistant-message identity.
+    # Legacy plan fields stay readable while the harness owns the durable brief,
+    # subtask, evidence, verification, and synthesis state.
     plan: ResearchPlan | None = None
+    brief: ResearchBrief | None = None
+    verification: ResearchVerification | None = None
+    subtasks: list[ResearchSubtask] = Field(default_factory=list[ResearchSubtask])
     sources: list[ResearchSource] = Field(default_factory=list[ResearchSource])
     citations: list[ResearchCitation] = Field(default_factory=list[ResearchCitation])
     completed_step_ids: list[str] = Field(default_factory=list)
@@ -169,14 +249,23 @@ class ResearchJob(StrictModel):
     user_id: str
     conversation_id: UUID
     query: str
+    model: str = "gpt-5.6-terra"
+    prompt_version: str = "research-harness-v3"
     status: ResearchStatus = ResearchStatus.QUEUED
     progress: float = Field(default=0, ge=0, le=1)
     provider_response_id: str | None = None
     provider_status: str | None = None
     previous_response_ids: list[str] = Field(default_factory=list)
+    budget: ResearchBudget = Field(default_factory=ResearchBudget)
+    search_round: int = Field(default=0, ge=0, le=2)
+    total_tool_calls: int = Field(default=0, ge=0, le=1_000)
+    budget_exceeded: bool = False
+    hard_budget_reached: bool = False
+    citation_coverage: float | None = Field(default=None, ge=0, le=1)
     checkpoint: ResearchCheckpoint = Field(default_factory=ResearchCheckpoint)
     failure_reason: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
+    run_started_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 

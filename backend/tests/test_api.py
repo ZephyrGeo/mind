@@ -37,8 +37,15 @@ from backend.models import (
     MessageRole,
     ModelMessage,
     ResearchJob,
+    ResearchBrief,
+    ResearchBriefQuestion,
     ResearchRequest,
+    ResearchCitation,
+    ResearchSource,
     ResearchStatus,
+    ResearchSubtask,
+    ResearchTaskKind,
+    ResearchTaskStatus,
     Routine,
     ToolCall,
     User,
@@ -46,6 +53,7 @@ from backend.models import (
 from backend.openai_research_provider import OpenAIResearchProvider
 from backend.research_provider import (
     ResearchProviderError,
+    ResearchProviderRequest,
     ResearchProviderResult,
 )
 from backend.research_store import (
@@ -141,27 +149,117 @@ def completed_research_response(response_id: str) -> dict[str, object]:
     }
 
 
+def completed_text_response(
+    response_id: str,
+    text: str,
+) -> dict[str, object]:
+    return {
+        "id": response_id,
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": text}],
+            }
+        ],
+    }
+
+
 class MockResearchProvider:
     """Test-only provider; production selection remains OpenAI-only."""
 
     name = "openai"
     billable_calls = False
     configured = True
+    model = "gpt-5.6-terra"
 
     def __init__(self) -> None:
         self.parser = OpenAIResearchProvider(api_key="test-openai-key")
-        self.start_calls: list[str] = []
+        self.start_calls: list[ResearchProviderRequest] = []
         self.retrieve_calls: list[str] = []
         self.cancel_calls: list[str] = []
         self.responses: dict[str, list[dict[str, object]]] = {}
         self.fail_retrieve_once = False
+        self.return_verification_gap_once = False
+        self.search_tool_call_count = 1
+        self.search_tool_call_counts: list[int] = []
+        self.synthesis_outputs: list[str] = []
 
-    def start(self, query: str) -> Mapping[str, object]:
-        self.start_calls.append(query)
+    def start(self, request: ResearchProviderRequest) -> Mapping[str, object]:
+        self.start_calls.append(request)
         response_id = f"resp_mock_{len(self.start_calls)}"
+        if request.task_kind == "brief":
+            completed = completed_text_response(
+                response_id,
+                json.dumps(
+                    {
+                        "objective": "Evaluate evidence for a personal agent.",
+                        "scope": ["current evidence practices"],
+                        "assumptions": [],
+                        "success_criteria": ["cited recommendations"],
+                        "subquestions": [
+                            {
+                                "id": f"q{index}",
+                                "question": f"Research evidence dimension {index}",
+                                "objective": f"Collect evidence for dimension {index}",
+                            }
+                            for index in range(1, 5)
+                        ],
+                    }
+                ),
+            )
+        elif request.task_kind == "verify":
+            gaps = []
+            if self.return_verification_gap_once:
+                self.return_verification_gap_once = False
+                gaps = [
+                    {
+                        "id": "gap1",
+                        "question": "Find one missing authoritative source.",
+                        "reason": "The first round lacks primary evidence.",
+                    }
+                ]
+            completed = completed_text_response(
+                response_id,
+                json.dumps(
+                    {
+                        "summary": "Evidence is sufficient.",
+                        "conflicts": [],
+                        "gaps": gaps,
+                        "coverage_notes": ["Four dimensions covered."],
+                    }
+                ),
+            )
+        elif request.task_kind in {"synthesis", "citation_repair"}:
+            output_text = (
+                self.synthesis_outputs.pop(0)
+                if self.synthesis_outputs
+                else "## Research summary\n\nEvidence supports the result [S1]."
+            )
+            completed = completed_text_response(
+                response_id,
+                output_text,
+            )
+        else:
+            completed = completed_research_response(response_id)
+            output = completed["output"]
+            assert isinstance(output, list)
+            search_call = output[0]
+            assert isinstance(search_call, dict)
+            tool_call_count = (
+                self.search_tool_call_counts.pop(0)
+                if self.search_tool_call_counts
+                else self.search_tool_call_count
+            )
+            output[0:1] = [
+                {**search_call, "id": f"ws_test_{index}"}
+                for index in range(tool_call_count)
+            ]
         self.responses[response_id] = [
             {"id": response_id, "status": "in_progress", "output": []},
-            completed_research_response(response_id),
+            completed,
         ]
         return {"id": response_id, "status": "queued", "output": []}
 
@@ -424,10 +522,40 @@ class MindFastAPIContractTest(unittest.TestCase):
         job = job_response.json()
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["progress"], 1.0)
-        self.assertEqual(job["provider_response_id"], "resp_mock_1")
+        self.assertEqual(job["provider_response_id"], "resp_mock_7")
         self.assertEqual(job["provider_status"], "completed")
         self.assertEqual(len(job["checkpoint"]["sources"]), 2)
         self.assertEqual(len(job["checkpoint"]["citations"]), 1)
+        self.assertEqual(len(job["checkpoint"]["subtasks"]), 7)
+        self.assertEqual(
+            [task["kind"] for task in job["checkpoint"]["subtasks"]],
+            [
+                "brief",
+                "search",
+                "search",
+                "search",
+                "search",
+                "verify",
+                "synthesis",
+            ],
+        )
+        self.assertTrue(
+            all(
+                task["response_id"]
+                for task in job["checkpoint"]["subtasks"]
+            )
+        )
+        search_tasks = [
+            task
+            for task in job["checkpoint"]["subtasks"]
+            if task["kind"] == "search"
+        ]
+        self.assertTrue(
+            all(
+                len(task["sources"]) == 2 and len(task["citations"]) == 1
+                for task in search_tasks
+            )
+        )
         self.assertIn("Research summary", job["checkpoint"]["report"])
 
         conversation = self.repository.get_conversation(
@@ -441,6 +569,212 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertEqual(
             str(conversation.messages[-1].research_job_id),
             job_id,
+        )
+
+    def test_research_repairs_low_sentence_level_citation_coverage(self) -> None:
+        self.research_provider.synthesis_outputs = [
+            (
+                "## Findings\n\n"
+                "Background responses can be polled by response identifier [S1]. "
+                "Repeated cancellation is idempotent."
+            ),
+            (
+                "## Findings\n\n"
+                "Background responses can be polled by response identifier [S1]. "
+                "Repeated cancellation is idempotent [S1]."
+            ),
+        ]
+
+        response = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Verify Background mode lifecycle behavior."},
+        )
+
+        events = parse_sse(response.text)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(events[-1]["citation_coverage"], 1.0)
+        job = self.research_repository.get_job(
+            events[0]["job_id"],
+            "local-developer",
+        )
+        self.assertEqual(job.citation_coverage, 1.0)
+        self.assertEqual(job.checkpoint.subtasks[-1].id, "citation-repair-1")
+        self.assertEqual(
+            job.checkpoint.subtasks[-1].kind,
+            ResearchTaskKind.CITATION_REPAIR,
+        )
+        self.assertIn("Repeated cancellation is idempotent [S1]", job.checkpoint.report)
+        self.assertEqual(
+            [request.task_kind for request in self.research_provider.start_calls][-2:],
+            ["synthesis", "citation_repair"],
+        )
+        search_prompt = next(
+            request.prompt
+            for request in self.research_provider.start_calls
+            if request.task_kind == "search"
+        )
+        verify_prompt = next(
+            request.prompt
+            for request in self.research_provider.start_calls
+            if request.task_kind == "verify"
+        )
+        synthesis_prompt = next(
+            request.prompt
+            for request in self.research_provider.start_calls
+            if request.task_kind == "synthesis"
+        )
+        self.assertIn("developers.openai.com first", search_prompt)
+        self.assertIn("A true conflict requires two evidence-backed", verify_prompt)
+        self.assertIn("Citation rules are sentence-level", synthesis_prompt)
+
+    def test_verification_reclassifies_gaps_and_keeps_only_true_conflicts(
+        self,
+    ) -> None:
+        service = self.client.app.state.research_service
+        verification = service._parse_verification(  # noqa: SLF001
+            json.dumps(
+                {
+                    "summary": "Checked current evidence.",
+                    "conflicts": [
+                        (
+                            "S1 says the limit is 10 minutes while S2 says the same "
+                            "scope has a 30-day limit; both cannot be true."
+                        ),
+                        (
+                            "S3 omits reconnect details; this is a documentation gap, "
+                            "not a conflict with S4."
+                        ),
+                    ],
+                    "gaps": [],
+                    "coverage_notes": [],
+                }
+            )
+        )
+
+        self.assertEqual(len(verification.conflicts), 1)
+        self.assertIn("S1", verification.conflicts[0])
+        self.assertTrue(
+            any(
+                "Reclassified as a gap" in note
+                for note in verification.coverage_notes
+            )
+        )
+
+    def test_research_allows_two_bounded_citation_repair_attempts(self) -> None:
+        low_coverage = (
+            "## Findings\n\n"
+            "Background responses can be polled by response identifier [S1]. "
+            "Repeated cancellation is idempotent."
+        )
+        self.research_provider.synthesis_outputs = [
+            low_coverage,
+            low_coverage,
+            low_coverage.replace("idempotent.", "idempotent [S1]."),
+        ]
+
+        response = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Exercise the bounded citation quality gate."},
+        )
+
+        events = parse_sse(response.text)
+        self.assertEqual(events[-1]["type"], "done")
+        job = self.research_repository.get_job(
+            events[0]["job_id"],
+            "local-developer",
+        )
+        self.assertEqual(
+            [task.id for task in job.checkpoint.subtasks[-2:]],
+            ["citation-repair-1", "citation-repair-2"],
+        )
+        self.assertEqual(job.citation_coverage, 1.0)
+
+    def test_background_research_requires_both_current_canonical_guides(
+        self,
+    ) -> None:
+        service = self.client.app.state.research_service
+        job = ResearchJob(
+            user_id="local-developer",
+            conversation_id=uuid.uuid4(),
+            query="Research OpenAI Responses API Background mode.",
+        )
+
+        self.assertEqual(  # noqa: SLF001
+            len(service._required_official_source_gaps(job)),
+            1,
+        )
+        job.checkpoint.sources.extend(
+            [
+                ResearchSource(
+                    id="S1",
+                    step_id="search-r1-q1",
+                    title="Background mode",
+                    url=(
+                        "https://platform.openai.com/docs/guides/background"
+                    ),
+                ),
+                ResearchSource(
+                    id="S2",
+                    step_id="search-r1-q2",
+                    title="Data controls",
+                    url=(
+                        "https://developers.openai.com/api/docs/guides/your-data"
+                    ),
+                ),
+            ]
+        )
+
+        self.assertEqual(  # noqa: SLF001
+            service._required_official_source_gaps(job),
+            [],
+        )
+
+    def test_get_consolidates_persisted_source_variants_and_markers(self) -> None:
+        response = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Deduplicate source variants."},
+        )
+        events = parse_sse(response.text)
+        job_id = str(events[0]["job_id"])
+        job = self.research_repository.get_job(job_id, "local-developer")
+        duplicate = ResearchSource(
+            id="S9",
+            step_id="search-r1-q4",
+            title="Tracked Example source",
+            url="https://example.com/primary/?utm_source=openai",
+        )
+        job.checkpoint.sources.append(duplicate)
+        job.checkpoint.subtasks[-1].sources.append(duplicate.model_copy())
+        job.checkpoint.report += "\n\nDuplicate evidence [S9]."
+        marker = job.checkpoint.report.index("[S9]")
+        job.checkpoint.citations.append(
+            ResearchCitation(
+                source_id="S9",
+                title=duplicate.title,
+                url=duplicate.url,
+                start_index=marker,
+                end_index=marker + 4,
+            )
+        )
+        self.research_repository.save_job(job, "local-developer")
+
+        refreshed = self.client.get(
+            f"/api/research/{job_id}",
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(refreshed.status_code, 200)
+        payload = refreshed.json()
+        self.assertEqual(len(payload["checkpoint"]["sources"]), 2)
+        self.assertNotIn("S9", payload["checkpoint"]["report"])
+        self.assertTrue(
+            all(
+                citation["source_id"] != "S9"
+                for citation in payload["checkpoint"]["citations"]
+            )
         )
 
     def test_failed_poll_resumes_the_same_openai_response_without_restarting(
@@ -481,13 +815,218 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertEqual(resumed_events[-1]["type"], "done")
         completed = self.research_repository.get_job(job_id, "local-developer")
         self.assertEqual(completed.status, ResearchStatus.COMPLETED)
-        self.assertEqual(self.research_provider.start_calls, ["Checkpointed research"])
-        self.assertTrue(
-            all(
-                response_id == "resp_mock_1"
-                for response_id in self.research_provider.retrieve_calls
+        self.assertEqual(
+            [request.task_kind for request in self.research_provider.start_calls],
+            ["brief", "search", "search", "search", "search", "verify", "synthesis"],
+        )
+        self.assertEqual(
+            sum(
+                request.task_kind == "brief"
+                for request in self.research_provider.start_calls
+            ),
+            1,
+        )
+        self.assertIn("resp_mock_1", self.research_provider.retrieve_calls)
+
+    def test_timeout_resume_refreshes_run_window_and_retries_cancelled_stage(
+        self,
+    ) -> None:
+        conversation_id = self.repository.append_user_message(
+            None,
+            "Resume a timed out citation repair",
+            AgentMode.RESEARCH,
+            user_id="local-developer",
+        )
+        old_start = datetime.now(timezone.utc) - timedelta(minutes=20)
+        job = self.research_repository.create_job(
+            ResearchJob(
+                user_id="local-developer",
+                conversation_id=uuid.UUID(conversation_id),
+                query="Resume a timed out citation repair",
+                status=ResearchStatus.FAILED,
+                failure_reason="research_timeout",
+                run_started_at=old_start,
+                checkpoint={
+                    "subtasks": [
+                        ResearchSubtask(
+                            id="synthesis",
+                            kind=ResearchTaskKind.SYNTHESIS,
+                            question="Write the report",
+                            status=ResearchTaskStatus.COMPLETED,
+                            response_id="resp_synthesis",
+                            output_text="A cited draft [S1].",
+                        ),
+                        ResearchSubtask(
+                            id="citation-repair-1",
+                            kind=ResearchTaskKind.CITATION_REPAIR,
+                            question="Repair citations",
+                            status=ResearchTaskStatus.CANCELLED,
+                            response_id="resp_timed_out_repair",
+                            error_code="research_timeout",
+                        ),
+                    ]
+                },
             )
         )
+
+        resumed = self.client.app.state.research_service.prepare_resume(
+            job.id,
+            "local-developer",
+        )
+
+        repair = resumed.checkpoint.subtasks[-1]
+        self.assertEqual(resumed.status, ResearchStatus.SYNTHESIZING)
+        self.assertGreater(resumed.run_started_at, old_start)
+        self.assertEqual(repair.status, ResearchTaskStatus.PENDING)
+        self.assertIsNone(repair.response_id)
+        self.assertIn("resp_timed_out_repair", resumed.previous_response_ids)
+
+    def test_research_runs_a_bounded_second_search_round_for_evidence_gaps(
+        self,
+    ) -> None:
+        self.research_provider.return_verification_gap_once = True
+
+        response = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Find and close one evidence gap."},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        events = parse_sse(response.text)
+        self.assertEqual(events[-1]["type"], "done")
+        job = self.research_repository.get_job(
+            events[0]["job_id"],
+            "local-developer",
+        )
+        self.assertEqual(job.search_round, 2)
+        self.assertEqual(job.status, ResearchStatus.COMPLETED)
+        self.assertEqual(
+            [task.kind.value for task in job.checkpoint.subtasks],
+            [
+                "brief",
+                "search",
+                "search",
+                "search",
+                "search",
+                "verify",
+                "search",
+                "verify",
+                "synthesis",
+            ],
+        )
+        self.assertLessEqual(
+            job.total_tool_calls,
+            job.budget.max_total_tool_calls,
+        )
+        self.assertTrue(
+            all(
+                task.response_id
+                for task in job.checkpoint.subtasks
+                if task.kind != ResearchTaskKind.SEARCH
+                or task.status == ResearchTaskStatus.COMPLETED
+            )
+        )
+
+    def test_research_reports_real_tool_call_overrun_and_stops_searches(
+        self,
+    ) -> None:
+        provider = MockResearchProvider()
+        provider.search_tool_call_count = 2
+        data_path = Path(self.temporary_directory.name) / "budget-conversations.json"
+        research_path = Path(self.temporary_directory.name) / "budget-research.json"
+        conversations = JsonConversationRepository(data_path)
+        research_jobs = JsonResearchRepository(research_path)
+        settings = Settings(
+            environment="test",
+            local_token=TEST_TOKEN,
+            data_path=data_path,
+            research_data_path=research_path,
+            research_poll_interval_seconds=0.001,
+            research_max_subquestions=4,
+            research_max_total_tool_calls=5,
+            quiet=True,
+        )
+        client = TestClient(
+            create_app(
+                settings=settings,
+                repository=conversations,
+                provider=self.provider,
+                research_repository=research_jobs,
+                research_provider=provider,
+            )
+        )
+        self.addCleanup(client.close)
+
+        response = client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Stay within a strict search budget."},
+        )
+        events = parse_sse(response.text)
+        done = events[-1]
+        job = research_jobs.get_job(str(events[0]["job_id"]), "local-developer")
+
+        self.assertEqual(done["type"], "done")
+        self.assertTrue(done["budget_exceeded"])
+        self.assertTrue(done["hard_budget_reached"])
+        self.assertEqual(done["max_total_tool_calls"], 5)
+        self.assertEqual(done["hard_max_total_tool_calls"], 6)
+        self.assertEqual(done["total_tool_calls"], 6)
+        self.assertTrue(job.budget_exceeded)
+        self.assertTrue(job.hard_budget_reached)
+        self.assertTrue(
+            any(
+                task.error_code == "research_hard_budget_reached"
+                for task in job.checkpoint.subtasks
+            )
+        )
+
+    def test_research_allows_small_overrun_below_hard_limit(self) -> None:
+        provider = MockResearchProvider()
+        provider.search_tool_call_counts = [3, 2, 2, 2]
+        data_path = Path(self.temporary_directory.name) / "soft-conversations.json"
+        research_path = Path(self.temporary_directory.name) / "soft-research.json"
+        conversations = JsonConversationRepository(data_path)
+        research_jobs = JsonResearchRepository(research_path)
+        settings = Settings(
+            environment="test",
+            local_token=TEST_TOKEN,
+            data_path=data_path,
+            research_data_path=research_path,
+            research_poll_interval_seconds=0.001,
+            research_max_subquestions=4,
+            research_max_total_tool_calls=8,
+            quiet=True,
+        )
+        client = TestClient(
+            create_app(
+                settings=settings,
+                repository=conversations,
+                provider=self.provider,
+                research_repository=research_jobs,
+                research_provider=provider,
+            )
+        )
+        self.addCleanup(client.close)
+
+        response = client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Use a small amount of extra search budget."},
+        )
+        events = parse_sse(response.text)
+        done = events[-1]
+        job = research_jobs.get_job(str(events[0]["job_id"]), "local-developer")
+
+        self.assertEqual(done["type"], "done")
+        self.assertEqual(done["max_total_tool_calls"], 8)
+        self.assertEqual(done["hard_max_total_tool_calls"], 10)
+        self.assertEqual(done["total_tool_calls"], 9)
+        self.assertTrue(done["budget_exceeded"])
+        self.assertFalse(done["hard_budget_reached"])
+        self.assertTrue(job.budget_exceeded)
+        self.assertFalse(job.hard_budget_reached)
 
     def test_research_jobs_are_tenant_scoped(self) -> None:
         other_job = self.research_repository.create_job(
@@ -549,6 +1088,8 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json()["status"], "completed")
         self.assertEqual(second.json()["status"], "completed")
+        self.assertEqual(len(first.json()["checkpoint"]["citations"]), 1)
+        self.assertEqual(len(second.json()["checkpoint"]["citations"]), 1)
         self.assertEqual(self.research_provider.start_calls, [])
         self.assertEqual(self.research_provider.retrieve_calls, ["resp_existing"])
         conversation = self.repository.get_conversation(
@@ -557,6 +1098,79 @@ class MindFastAPIContractTest(unittest.TestCase):
         )
         self.assertEqual(len(conversation.messages), 2)
         self.assertIn("Research summary", conversation.messages[-1].content)
+
+    def test_get_recovers_every_saved_parallel_response_without_starting(self) -> None:
+        conversation_id = self.repository.append_user_message(
+            None,
+            "Restore parallel workers",
+            AgentMode.RESEARCH,
+            user_id="local-developer",
+        )
+        brief = ResearchBrief(
+            objective="Restore two saved workers.",
+            subquestions=[
+                ResearchBriefQuestion(
+                    id=f"q{index}",
+                    question=f"Question {index}",
+                    objective=f"Objective {index}",
+                )
+                for index in range(1, 5)
+            ],
+        )
+        job = self.research_repository.create_job(
+            ResearchJob(
+                user_id="local-developer",
+                conversation_id=uuid.UUID(conversation_id),
+                query="Restore parallel workers",
+                status=ResearchStatus.COLLECTING,
+                provider_response_id="resp_parallel_restore_2",
+                provider_status="in_progress",
+                search_round=1,
+                checkpoint={
+                    "brief": brief,
+                    "subtasks": [
+                        ResearchSubtask(
+                            id=f"search-r1-q{index}",
+                            kind=ResearchTaskKind.SEARCH,
+                            round_index=1,
+                            subquestion_id=f"q{index}",
+                            question=f"Question {index}",
+                            status=ResearchTaskStatus.RUNNING,
+                            response_id=f"resp_parallel_restore_{index}",
+                            provider_status="in_progress",
+                        )
+                        for index in range(1, 3)
+                    ],
+                },
+            )
+        )
+        for index in range(1, 3):
+            response_id = f"resp_parallel_restore_{index}"
+            self.research_provider.register(
+                response_id,
+                completed_research_response(response_id),
+            )
+
+        response = self.client.get(
+            f"/api/research/{job.id}",
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "verifying")
+        self.assertEqual(self.research_provider.start_calls, [])
+        self.assertEqual(
+            self.research_provider.retrieve_calls,
+            ["resp_parallel_restore_1", "resp_parallel_restore_2"],
+        )
+        restored_search_tasks = [
+            task
+            for task in response.json()["checkpoint"]["subtasks"]
+            if task["kind"] == "search"
+        ]
+        self.assertTrue(
+            all(task["status"] == "completed" for task in restored_search_tasks)
+        )
 
     def test_cancel_calls_openai_and_resume_starts_a_new_response(self) -> None:
         conversation_id = self.repository.append_user_message(
@@ -610,7 +1224,68 @@ class MindFastAPIContractTest(unittest.TestCase):
         restarted = self.research_repository.get_job(job.id, "local-developer")
         self.assertEqual(restarted.previous_response_ids, ["resp_cancelled"])
         self.assertNotEqual(restarted.provider_response_id, "resp_cancelled")
-        self.assertEqual(self.research_provider.start_calls, ["Research cancellation"])
+        self.assertEqual(
+            [request.task_kind for request in self.research_provider.start_calls],
+            ["brief", "search", "search", "search", "search", "verify", "synthesis"],
+        )
+
+    def test_cancel_stops_every_running_subtask_response(self) -> None:
+        conversation_id = self.repository.append_user_message(
+            None,
+            "Cancel parallel research",
+            AgentMode.RESEARCH,
+            user_id="local-developer",
+        )
+        job = self.research_repository.create_job(
+            ResearchJob(
+                user_id="local-developer",
+                conversation_id=uuid.UUID(conversation_id),
+                query="Cancel parallel research",
+                status=ResearchStatus.COLLECTING,
+                provider_response_id="resp_parallel_2",
+                provider_status="in_progress",
+                search_round=1,
+                checkpoint={
+                    "subtasks": [
+                        ResearchSubtask(
+                            id="search-r1-q1",
+                            kind=ResearchTaskKind.SEARCH,
+                            round_index=1,
+                            question="First parallel question",
+                            status=ResearchTaskStatus.RUNNING,
+                            response_id="resp_parallel_1",
+                            provider_status="in_progress",
+                        ),
+                        ResearchSubtask(
+                            id="search-r1-q2",
+                            kind=ResearchTaskKind.SEARCH,
+                            round_index=1,
+                            question="Second parallel question",
+                            status=ResearchTaskStatus.RUNNING,
+                            response_id="resp_parallel_2",
+                            provider_status="in_progress",
+                        ),
+                    ]
+                },
+            )
+        )
+        for response_id in ("resp_parallel_1", "resp_parallel_2"):
+            self.research_provider.register(
+                response_id,
+                {"id": response_id, "status": "in_progress", "output": []},
+            )
+
+        response = self.client.post(
+            f"/api/research/{job.id}/cancel",
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "cancelled")
+        self.assertEqual(
+            self.research_provider.cancel_calls,
+            ["resp_parallel_1", "resp_parallel_2"],
+        )
 
     def test_second_turn_receives_persisted_history(self) -> None:
         provider = RecordingModelProvider()
@@ -1195,7 +1870,16 @@ class OpenAIResearchProviderTest(unittest.TestCase):
             api_key="test-openai-key",
             opener=opener,
         )
-        result = provider.parse_result(provider.start("test query"))
+        result = provider.parse_result(
+            provider.start(
+                ResearchProviderRequest(
+                    prompt="test query",
+                    task_kind="search",
+                    use_web_search=True,
+                    max_tool_calls=5,
+                )
+            )
+        )
 
         self.assertEqual(result.response_id, "resp_test")
         self.assertEqual(result.status, "queued")
@@ -1218,9 +1902,35 @@ class OpenAIResearchProviderTest(unittest.TestCase):
             ["web_search_call.action.sources"],
         )
         self.assertEqual(body["reasoning"], {"effort": "high"})
-        self.assertEqual(body["max_tool_calls"], 12)
-        self.assertIn("Do not manually repeat raw source URLs", body["input"])
-        self.assertIn("structured response metadata", body["input"])
+        self.assertEqual(body["max_tool_calls"], 5)
+        self.assertEqual(body["input"], "test query")
+
+    def test_non_search_stage_does_not_enable_web_search(self) -> None:
+        captured: dict[str, object] = {}
+
+        def opener(request: Request, *, timeout: float) -> StubJsonResponse:
+            del timeout
+            captured["request"] = request
+            return StubJsonResponse(
+                {"id": "resp_brief", "status": "queued", "output": []}
+            )
+
+        provider = OpenAIResearchProvider(
+            api_key="test-openai-key",
+            opener=opener,
+        )
+        provider.start(
+            ResearchProviderRequest(
+                prompt="create a brief",
+                task_kind="brief",
+            )
+        )
+
+        request = captured["request"]
+        assert isinstance(request, Request)
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertNotIn("tools", body)
+        self.assertNotIn("max_tool_calls", body)
 
     def test_parse_result_keeps_output_citations_and_complete_sources(self) -> None:
         provider = OpenAIResearchProvider(api_key="test-key")
@@ -1237,6 +1947,35 @@ class OpenAIResearchProviderTest(unittest.TestCase):
             ],
             "Example source",
         )
+        self.assertEqual(
+            [source.url for source in result.sources],
+            [
+                "https://example.com/primary",
+                "https://example.com/complete-list-only",
+            ],
+        )
+
+    def test_parse_result_deduplicates_tracking_url_variants(self) -> None:
+        provider = OpenAIResearchProvider(api_key="test-key")
+        response = completed_research_response("resp_duplicates")
+        output = response["output"]
+        assert isinstance(output, list)
+        search_call = output[0]
+        assert isinstance(search_call, dict)
+        action = search_call["action"]
+        assert isinstance(action, dict)
+        sources = action["sources"]
+        assert isinstance(sources, list)
+        sources.append(
+            {
+                "type": "url",
+                "url": "https://example.com/primary/?utm_source=openai",
+                "title": "Duplicate Example source",
+            }
+        )
+
+        result = provider.parse_result(response)
+
         self.assertEqual(
             [source.url for source in result.sources],
             [
@@ -1297,7 +2036,9 @@ class OpenAIResearchProviderTest(unittest.TestCase):
         unconfigured = create_research_provider(Settings())
         self.assertFalse(unconfigured.configured)
         with self.assertRaises(ResearchProviderError) as context:
-            unconfigured.start("test")
+            unconfigured.start(
+                ResearchProviderRequest(prompt="test", task_kind="brief")
+            )
         self.assertEqual(context.exception.code, "research_not_configured")
 
 

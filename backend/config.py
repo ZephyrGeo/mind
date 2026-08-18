@@ -68,6 +68,13 @@ class Settings:
     research_model: str = DEFAULT_RESEARCH_MODEL
     research_reasoning_effort: str = "high"
     research_max_tool_calls: int = 12
+    research_max_search_rounds: int = 2
+    research_max_subquestions: int = 6
+    research_max_total_tool_calls: int = 24
+    research_tool_call_overrun_ratio: float = 0.15
+    research_max_tool_call_overrun: int = 3
+    research_min_citation_coverage: float = 0.8
+    research_job_timeout_seconds: int = 600
     research_poll_interval_seconds: float = 2.0
     openai_timeout_seconds: float = 120.0
     log_level: str = "INFO"
@@ -164,6 +171,30 @@ class Settings:
             raise ValueError("MIND_RESEARCH_REASONING_EFFORT is unsupported.")
         if self.research_max_tool_calls < 1:
             raise ValueError("MIND_RESEARCH_MAX_TOOL_CALLS must be positive.")
+        if not 1 <= self.research_max_search_rounds <= 2:
+            raise ValueError("MIND_RESEARCH_MAX_SEARCH_ROUNDS must be 1 or 2.")
+        if not 4 <= self.research_max_subquestions <= 8:
+            raise ValueError("MIND_RESEARCH_MAX_SUBQUESTIONS must be between 4 and 8.")
+        if self.research_max_total_tool_calls < self.research_max_subquestions:
+            raise ValueError(
+                "MIND_RESEARCH_MAX_TOTAL_TOOL_CALLS must cover every subquestion."
+            )
+        if not 0 <= self.research_tool_call_overrun_ratio <= 0.5:
+            raise ValueError(
+                "MIND_RESEARCH_TOOL_CALL_OVERRUN_RATIO must be between 0 and 0.5."
+            )
+        if not 0 <= self.research_max_tool_call_overrun <= 20:
+            raise ValueError(
+                "MIND_RESEARCH_MAX_TOOL_CALL_OVERRUN must be between 0 and 20."
+            )
+        if not 0 <= self.research_min_citation_coverage <= 1:
+            raise ValueError(
+                "MIND_RESEARCH_MIN_CITATION_COVERAGE must be between 0 and 1."
+            )
+        if not 60 <= self.research_job_timeout_seconds <= 3_600:
+            raise ValueError(
+                "MIND_RESEARCH_JOB_TIMEOUT_SECONDS must be between 60 and 3600."
+            )
         if self.research_poll_interval_seconds <= 0:
             raise ValueError(
                 "MIND_RESEARCH_POLL_INTERVAL_SECONDS must be positive."
@@ -277,6 +308,27 @@ class Settings:
             ),
             research_max_tool_calls=int(
                 os.environ.get("MIND_RESEARCH_MAX_TOOL_CALLS", "12")
+            ),
+            research_max_search_rounds=int(
+                os.environ.get("MIND_RESEARCH_MAX_SEARCH_ROUNDS", "2")
+            ),
+            research_max_subquestions=int(
+                os.environ.get("MIND_RESEARCH_MAX_SUBQUESTIONS", "6")
+            ),
+            research_max_total_tool_calls=int(
+                os.environ.get("MIND_RESEARCH_MAX_TOTAL_TOOL_CALLS", "24")
+            ),
+            research_tool_call_overrun_ratio=float(
+                os.environ.get("MIND_RESEARCH_TOOL_CALL_OVERRUN_RATIO", "0.15")
+            ),
+            research_max_tool_call_overrun=int(
+                os.environ.get("MIND_RESEARCH_MAX_TOOL_CALL_OVERRUN", "3")
+            ),
+            research_min_citation_coverage=float(
+                os.environ.get("MIND_RESEARCH_MIN_CITATION_COVERAGE", "0.8")
+            ),
+            research_job_timeout_seconds=int(
+                os.environ.get("MIND_RESEARCH_JOB_TIMEOUT_SECONDS", "600")
             ),
             research_poll_interval_seconds=float(
                 os.environ.get("MIND_RESEARCH_POLL_INTERVAL_SECONDS", "2")

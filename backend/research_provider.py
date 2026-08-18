@@ -25,6 +25,16 @@ class ProviderSource:
 
 
 @dataclass(frozen=True, slots=True)
+class ResearchProviderRequest:
+    """One bounded harness task executed by a replaceable provider."""
+
+    prompt: str
+    task_kind: str
+    use_web_search: bool = False
+    max_tool_calls: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchProviderResult:
     """Normalized result shared by ResearchService and provider implementations."""
 
@@ -36,6 +46,7 @@ class ResearchProviderResult:
     error_code: str | None = None
     public_message: str | None = None
     retryable: bool = False
+    tool_call_count: int = 0
 
 
 class ResearchProvider(Protocol):
@@ -44,8 +55,9 @@ class ResearchProvider(Protocol):
     name: str
     billable_calls: bool
     configured: bool
+    model: str
 
-    def start(self, query: str) -> Mapping[str, Any]:
+    def start(self, request: ResearchProviderRequest) -> Mapping[str, Any]:
         """Start a new provider task and return its raw response object."""
 
         ...

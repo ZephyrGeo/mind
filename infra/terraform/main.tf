@@ -117,7 +117,7 @@ resource "google_cloud_run_v2_service" "api" {
 
   template {
     service_account = google_service_account.api.email
-    timeout         = "300s"
+    timeout         = "900s"
 
     scaling {
       min_instance_count = var.min_instances
@@ -186,6 +186,42 @@ resource "google_cloud_run_v2_service" "api" {
       env {
         name  = "MIND_RESEARCH_MODEL"
         value = "gpt-5.6-terra"
+      }
+      env {
+        name  = "MIND_RESEARCH_REASONING_EFFORT"
+        value = "high"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_TOOL_CALLS"
+        value = "12"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_SEARCH_ROUNDS"
+        value = "2"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_SUBQUESTIONS"
+        value = "6"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_TOTAL_TOOL_CALLS"
+        value = "24"
+      }
+      env {
+        name  = "MIND_RESEARCH_TOOL_CALL_OVERRUN_RATIO"
+        value = "0.15"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_TOOL_CALL_OVERRUN"
+        value = "3"
+      }
+      env {
+        name  = "MIND_RESEARCH_MIN_CITATION_COVERAGE"
+        value = "0.8"
+      }
+      env {
+        name  = "MIND_RESEARCH_JOB_TIMEOUT_SECONDS"
+        value = "600"
       }
       env {
         name = "OPENAI_API_KEY"

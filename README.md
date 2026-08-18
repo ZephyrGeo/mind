@@ -14,8 +14,9 @@ Deep Research uses an independent OpenAI ResearchProvider.
 - Deterministic Fake ModelProvider with no external model calls
 - Opt-in DeepSeek V4 streaming provider with explicit billing status
 - Bounded multi-turn model context from persisted conversation history
-- OpenAI Responses API Deep Research with background execution, built-in web
-  search, inline citations, complete source lists, cancel, and refresh recovery
+- Mind Research Harness with a Research Brief, 4–6 parallel Terra web-search
+  workers, evidence-gap and conflict checks, an optional second search round,
+  cited synthesis, per-subtask recovery, and cancel-all semantics
 - Searchable, time-grouped conversation history with no display cap
 - Reopenable conversations after a page reload
 - Confirmed, tenant-scoped deletion of conversation history
@@ -81,9 +82,18 @@ MIND_RESEARCH_PROVIDER=openai
 MIND_RESEARCH_MODEL=gpt-5.6-terra
 ```
 
-Research starts a background OpenAI Response with built-in web search and can
-incur cost. The header reports whether Research is ready before a run starts.
-DeepSeek remains the optional Chat provider and is not used by Research.
+Research runs several bounded background OpenAI Responses. Mind plans and
+coordinates the stages; only evidence-collection workers enable built-in web
+search. The default budget is two rounds, at most six initial subquestions, 24
+total web-search calls, and ten minutes. Runs can therefore take several minutes
+and incur cost. DeepSeek remains the optional Chat provider and is not used by
+Research.
+
+Current canonical documentation is preferred over legacy guide URLs. Final
+reports must pass an 80% sentence-level citation coverage gate; up to two
+persisted citation-repair Responses run automatically when needed.
+OpenAI Background-mode research also requires both the current canonical
+Background and data-controls guides before a report can complete.
 
 The default model is `deepseek-v4-flash`; set `MIND_DEEPSEEK_MODEL` to
 `deepseek-v4-pro` when you explicitly want the higher-cost model. Variables
