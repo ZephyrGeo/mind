@@ -155,6 +155,7 @@ class Conversation(StrictModel):
 class ConversationSummary(StrictModel):
     id: UUID
     title: str
+    mode: AgentMode = AgentMode.CHAT
     updated_at: datetime
     message_count: int = Field(ge=0)
 

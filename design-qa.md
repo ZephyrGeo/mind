@@ -124,3 +124,64 @@ Blocked for the same reason. The expanded review row and Chinese typography requ
 None classified until the first rendered comparison is available.
 
 final result: blocked
+
+---
+
+# Mind Sidebar Chat and Research Sections Design QA
+
+- Source visual truth: `/var/folders/h3/hrcbcfns6nv185w_syw_lbbh0000gn/T/codex-clipboard-7a2e015c-5c35-4d0b-8c55-61acf767bb27.png`
+- Implementation screenshot: unavailable because the saved in-app browser permission blocks `http://127.0.0.1:3000/`
+- Intended viewport: desktop sidebar; exact CSS viewport was not supplied
+- Source pixels: 560 × 740
+- Implementation pixels: unavailable
+- Density normalization: unavailable until the implementation can be captured
+- State: expanded Chats and Research history sections, light theme
+
+**Findings**
+
+- [P1] Browser-rendered comparison is unavailable.
+  Evidence: the source screenshot was opened and inspected, but the in-app browser rejected local access before an implementation screenshot could be captured.
+  Impact: final spacing, label alignment, caret placement, transition behavior, and console health cannot be approved visually.
+  Fix: allow localhost access in the in-app browser and capture the expanded and collapsed sidebar states.
+
+**Required Fidelity Surfaces**
+
+- Fonts and typography: existing sidebar sans-serif sizing is preserved; rendered fidelity is blocked.
+- Spacing and layout rhythm: Chats and Research are separate stacked sections with compact title rows; rendered fidelity is blocked.
+- Colors and visual tokens: existing neutral sidebar and hover tokens are reused; rendered contrast is blocked.
+- Image quality and asset fidelity: no raster imagery is required; section and caret controls use the existing Phosphor icon library.
+- Copy and content: both section names, independent empty states, and search-aware empty messages are present.
+
+**Full-view Comparison Evidence**
+
+Blocked: no browser-rendered implementation screenshot is available for a combined comparison with the source.
+
+**Focused Region Comparison Evidence**
+
+Blocked for the same reason. The source itself is already a focused sidebar crop.
+
+**Primary Interactions and Console**
+
+- Both sections remain visible even when empty.
+- Each section has an independent accessible expand/collapse button.
+- Automated frontend contracts pass.
+- Browser interaction testing and console-error inspection are blocked by saved localhost permissions.
+
+**Comparison History**
+
+- Initial implementation: separated stored conversations by `mode` into Chats and Research.
+- Current refinement: added persistent dual section headings, independent caret controls, collapsed states, and section-specific empty states.
+- Post-fix visual comparison: blocked before local navigation by the saved permission.
+
+**Implementation Checklist**
+
+- Restart the local app so the backend returns conversation `mode` values.
+- Capture expanded Chats and Research sections.
+- Collapse and reopen each section and confirm the other section is unaffected.
+- Check truncation, hover/active states, and browser console errors.
+
+**Follow-up Polish**
+
+None classified until the rendered comparison is available.
+
+final result: blocked
