@@ -238,6 +238,12 @@ class FirestoreRepositoryTest(unittest.TestCase):
         )
         self.assertEqual(len(research_detail.messages), 2)
         self.assertEqual(research_detail.messages[-1].content, "Final cited report")
+        summaries = self.conversations.list_conversations("owner")
+        summaries_by_id = {str(summary.id): summary for summary in summaries}
+        self.assertEqual(
+            summaries_by_id[str(research_conversation_id)].mode,
+            AgentMode.RESEARCH,
+        )
 
         self.conversations.delete_for_user("owner")
         self.assertEqual(self.conversations.list_conversations("owner"), [])

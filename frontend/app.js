@@ -2,6 +2,8 @@
 
 const React = require("react");
 const { createRoot } = require("react-dom/client");
+const RadixSelect = require("@radix-ui/react-select");
+const RadixSwitch = require("@radix-ui/react-switch");
 const { createAuthService } = require("./auth.cjs");
 const { MarkdownContent } = require("./markdown.cjs");
 
@@ -32,11 +34,21 @@ const researchStages = [
 ];
 
 const navigation = [
-  { icon: "chat-circle", label: "Chat", view: "chat", mode: "chat" },
-  { icon: "magnifying-glass", label: "Research", view: "chat", mode: "research" },
   { icon: "diamond", label: "Memory", view: "memory" },
   { icon: "arrow-clockwise", label: "Heartbeats", view: "heartbeats" },
 ];
+
+function routeFromLocation() {
+  const route = window.location.hash.replace(/^#\/?/, "").split("?")[0];
+  if (route === "memory") return { view: "memory", mode: "chat" };
+  if (route === "research") return { view: "chat", mode: "research" };
+  return { view: "chat", mode: "chat" };
+}
+
+function routeHash(view, mode) {
+  if (view === "memory") return "#/memory";
+  return mode === "research" ? "#/research" : "#/chat";
+}
 
 const suggestions = [
   {
@@ -49,7 +61,8 @@ const suggestions = [
   },
   {
     title: "Find the signal in my notes",
-    prompt: "Show me how you would extract decisions, risks, and follow-ups from meeting notes.",
+    prompt:
+      "Show me how you would extract decisions, risks, and follow-ups from meeting notes.",
   },
 ];
 
@@ -58,58 +71,6 @@ function Icon({ name, weight = "regular", className = "" }) {
   return h("i", {
     className: `${weightClass} ph-${name}${className ? ` ${className}` : ""}`,
     "aria-hidden": "true",
-  });
-}
-
-function conversationGroupLabel(updatedAt, now = new Date()) {
-  const updatedDate = new Date(updatedAt);
-  if (Number.isNaN(updatedDate.getTime())) return "Older";
-
-  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
-  const conversationDay = Date.UTC(
-    updatedDate.getFullYear(),
-    updatedDate.getMonth(),
-    updatedDate.getDate(),
-  );
-  const daysAgo = Math.floor((today - conversationDay) / 86_400_000);
-
-  if (daysAgo <= 0) return "Today";
-  if (daysAgo === 1) return "Yesterday";
-  if (daysAgo < 7) return "Previous 7 Days";
-  if (daysAgo < 30) return "Previous 30 Days";
-
-  return updatedDate.toLocaleDateString(undefined, {
-    month: "long",
-    year: "numeric",
-  });
-}
-
-function groupConversations(conversations) {
-  const groups = [];
-  for (const conversation of conversations) {
-    const label = conversationGroupLabel(conversation.updated_at);
-    const currentGroup = groups.at(-1);
-    if (currentGroup?.label === label) {
-      currentGroup.conversations.push(conversation);
-    } else {
-      groups.push({ label, conversations: [conversation] });
-    }
-  }
-  return groups;
-}
-
-function formatConversationTime(updatedAt) {
-  const date = new Date(updatedAt);
-  if (Number.isNaN(date.getTime())) return "";
-  const today = new Date();
-  const isToday =
-    date.getFullYear() === today.getFullYear() &&
-    date.getMonth() === today.getMonth() &&
-    date.getDate() === today.getDate();
-  if (!isToday) return "";
-  return date.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
   });
 }
 
@@ -134,7 +95,9 @@ async function readSseStream(response, onEvent) {
     const frames = buffer.split("\n\n");
     buffer = frames.pop() ?? "";
     for (const frame of frames) {
-      const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+      const dataLine = frame
+        .split("\n")
+        .find((line) => line.startsWith("data: "));
       if (dataLine) onEvent(JSON.parse(dataLine.slice(6)));
     }
   }
@@ -147,7 +110,7 @@ function Brand({ onCollapse }) {
     h(
       "span",
       { className: "brand-mark", "aria-hidden": "true" },
-      h(Icon, { name: "star-four", weight: "fill" }),
+      h(Icon, { name: "snowflake" }),
     ),
     h("span", null, "Mind"),
     h(
@@ -169,7 +132,6 @@ function Sidebar({
   activeConversationId,
   currentUser,
   activeView,
-  mode,
   onCollapse,
   onNewChat,
   onOpenConversation,
@@ -180,6 +142,12 @@ function Sidebar({
   memoryReviewCount = 0,
 }) {
   const [conversationQuery, setConversationQuery] = useState("");
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState({
+    Chats: false,
+    Research: false,
+  });
+  const hasProfileActions = Boolean(onSignOut || onDeleteAccount);
   const searchRef = useRef(null);
   const normalizedQuery = conversationQuery.trim().toLocaleLowerCase();
   const visibleConversations = normalizedQuery
@@ -187,7 +155,22 @@ function Sidebar({
         conversation.title.toLocaleLowerCase().includes(normalizedQuery),
       )
     : conversations;
-  const conversationGroups = groupConversations(visibleConversations);
+  const conversationSections = [
+    {
+      label: "Chats",
+      icon: "chat-circle",
+      conversations: visibleConversations.filter(
+        (conversation) => (conversation.mode ?? "chat") !== "research",
+      ),
+    },
+    {
+      label: "Research",
+      icon: "magnifying-glass",
+      conversations: visibleConversations.filter(
+        (conversation) => conversation.mode === "research",
+      ),
+    },
+  ];
 
   useEffect(() => {
     function focusConversationSearch(event) {
@@ -199,6 +182,55 @@ function Sidebar({
     window.addEventListener("keydown", focusConversationSearch);
     return () => window.removeEventListener("keydown", focusConversationSearch);
   }, []);
+
+  useEffect(() => {
+    if (!profileMenuOpen) return undefined;
+    function closeProfileMenu(event) {
+      if (event.key === "Escape") setProfileMenuOpen(false);
+      if (
+        event.type === "mousedown" &&
+        !event.target.closest?.(".sidebar-footer")
+      ) {
+        setProfileMenuOpen(false);
+      }
+    }
+    window.addEventListener("keydown", closeProfileMenu);
+    window.addEventListener("mousedown", closeProfileMenu);
+    return () => {
+      window.removeEventListener("keydown", closeProfileMenu);
+      window.removeEventListener("mousedown", closeProfileMenu);
+    };
+  }, [profileMenuOpen]);
+
+  function conversationRow(conversation) {
+    return h(
+      "div",
+      { className: "conversation-row", key: conversation.id },
+      h(
+        "button",
+        {
+          className: `conversation-item${
+            conversation.id === activeConversationId ? " active" : ""
+          }`,
+          type: "button",
+          onClick: () => onOpenConversation(conversation),
+        },
+        h("span", { className: "conversation-bullet", "aria-hidden": "true" }),
+        h("span", { className: "conversation-title" }, conversation.title),
+      ),
+      h(
+        "button",
+        {
+          className: "conversation-delete",
+          type: "button",
+          "aria-label": `Delete ${conversation.title}`,
+          title: "Delete conversation",
+          onClick: () => onDeleteConversation(conversation),
+        },
+        h(Icon, { name: "trash" }),
+      ),
+    );
+  }
 
   return h(
     "aside",
@@ -227,13 +259,9 @@ function Sidebar({
     h(
       "nav",
       { className: "primary-nav", "aria-label": "Primary navigation" },
-      navigation.map((item) =>
-        {
-          const active =
-            item.view === activeView &&
-            (item.view !== "chat" || item.mode === mode);
-          return (
-        h(
+      navigation.map((item) => {
+        const active = item.view === activeView;
+        return h(
           "button",
           {
             className: `nav-item${active ? " active" : ""}`,
@@ -254,152 +282,149 @@ function Sidebar({
               )
             : null,
           active ? h("span", { className: "nav-indicator" }) : null,
-        )
-          );
-        },
-      ),
+        );
+      }),
     ),
     h(
       "div",
       { className: "conversation-list" },
-      visibleConversations.length
-        ? conversationGroups.map((group) =>
-            h(
-              "section",
-              { className: "conversation-group", key: group.label },
-              h("div", { className: "conversation-group-label" }, group.label),
-              group.conversations.map((conversation) => {
-                const updatedTime = formatConversationTime(conversation.updated_at);
-                return h(
-                  "div",
-                  { className: "conversation-row", key: conversation.id },
-                  h(
-                    "button",
-                    {
-                      className: `conversation-item${
-                        conversation.id === activeConversationId ? " active" : ""
-                      }`,
-                      type: "button",
-                      onClick: () => onOpenConversation(conversation),
-                    },
-                    h(
-                      "span",
-                      { className: "conversation-title" },
-                      conversation.title,
-                    ),
-                    updatedTime
-                      ? h("time", { dateTime: conversation.updated_at }, updatedTime)
-                      : null,
-                    h(
-                      "small",
-                      null,
-                      `${conversation.message_count} messages`,
-                    ),
-                  ),
-                  h(
-                    "button",
-                    {
-                      className: "conversation-delete",
-                      type: "button",
-                      "aria-label": `Delete ${conversation.title}`,
-                      title: "Delete conversation",
-                      onClick: () => onDeleteConversation(conversation),
-                    },
-                    h(Icon, { name: "trash" }),
-                  ),
-                );
-              }),
-            ),
-          )
-        : h(
-            "div",
-            { className: "empty-history" },
-            normalizedQuery
-              ? `No conversations match “${conversationQuery.trim()}”.`
-              : "Your conversations will appear here.",
+      conversationSections.map((section) =>
+        h(
+          "section",
+          {
+            className: `conversation-category${
+              collapsedSections[section.label] ? " collapsed" : ""
+            }`,
+            key: section.label,
+          },
+          h(
+            "button",
+            {
+              className: "conversation-category-label",
+              type: "button",
+              onClick: () =>
+                setCollapsedSections((current) => ({
+                  ...current,
+                  [section.label]: !current[section.label],
+                })),
+              "aria-expanded": !collapsedSections[section.label],
+              "aria-label": `${
+                collapsedSections[section.label] ? "Expand" : "Collapse"
+              } ${section.label}`,
+            },
+            h(Icon, { name: section.icon }),
+            h("span", null, section.label),
+            h(Icon, { name: "caret-down", className: "category-caret" }),
           ),
+          !collapsedSections[section.label]
+            ? section.conversations.length
+              ? h(
+                  "div",
+                  { className: "conversation-category-list" },
+                  section.conversations.map(conversationRow),
+                )
+              : h(
+                  "p",
+                  { className: "conversation-category-empty" },
+                  normalizedQuery
+                    ? `No matching ${section.label.toLocaleLowerCase()}.`
+                    : section.label === "Research"
+                      ? "No research yet."
+                      : "No chats yet.",
+                )
+            : null,
+        ),
+      ),
     ),
     h(
       "div",
       { className: "sidebar-footer" },
+      profileMenuOpen && hasProfileActions
+        ? h(
+            "div",
+            { className: "profile-menu", role: "menu" },
+            onSignOut
+              ? h(
+                  "button",
+                  {
+                    type: "button",
+                    role: "menuitem",
+                    onClick: () => {
+                      setProfileMenuOpen(false);
+                      onSignOut();
+                    },
+                  },
+                  h(Icon, { name: "sign-out" }),
+                  "Sign out",
+                )
+              : null,
+            onDeleteAccount
+              ? h(
+                  "button",
+                  {
+                    className: "danger",
+                    type: "button",
+                    role: "menuitem",
+                    onClick: () => {
+                      setProfileMenuOpen(false);
+                      onDeleteAccount();
+                    },
+                  },
+                  h(Icon, { name: "user-minus" }),
+                  "Delete account",
+                )
+              : null,
+          )
+        : null,
       h(
-        "div",
-        { className: "avatar" },
-        (currentUser?.displayName || currentUser?.email || "FY")
-          .split(/\s+|@/)
-          .filter(Boolean)
-          .slice(0, 2)
-          .map((part) => part[0])
-          .join("")
-          .toUpperCase(),
-      ),
-      h(
-        "div",
-        { className: "profile-copy" },
+        hasProfileActions ? "button" : "div",
+        {
+          className: `sidebar-profile${hasProfileActions ? "" : " static"}`,
+          ...(hasProfileActions
+            ? {
+                type: "button",
+                onClick: () => setProfileMenuOpen((open) => !open),
+                "aria-expanded": profileMenuOpen,
+                "aria-haspopup": "menu",
+              }
+            : {}),
+        },
         h(
-          "strong",
-          null,
-          currentUser?.displayName || currentUser?.email || "Local developer",
+          "span",
+          { className: "avatar" },
+          (currentUser?.displayName || currentUser?.email || "FY")
+            .split(/\s+|@/)
+            .filter(Boolean)
+            .slice(0, 2)
+            .map((part) => part[0])
+            .join("")
+            .toUpperCase(),
         ),
         h(
           "span",
-          null,
-          currentUser?.email ? "Private Firebase workspace" : "Private workspace",
+          { className: "profile-copy" },
+          h(
+            "strong",
+            null,
+            currentUser?.displayName || currentUser?.email || "Local developer",
+          ),
+          h(
+            "span",
+            null,
+            currentUser?.email
+              ? "Private Firebase workspace"
+              : "Private workspace",
+          ),
         ),
+        hasProfileActions
+          ? h(Icon, { name: "dots-three", weight: "bold" })
+          : null,
       ),
-      onDeleteAccount
-        ? h(
-            "button",
-            {
-              className: "icon-button ghost danger",
-              type: "button",
-              onClick: onDeleteAccount,
-              "aria-label": "Delete account",
-              title: "Delete account",
-            },
-            h(Icon, { name: "user-minus" }),
-          )
-        : null,
-      onSignOut
-        ? h(
-            "button",
-            {
-              className: "icon-button ghost",
-              type: "button",
-              onClick: onSignOut,
-              "aria-label": "Sign out",
-              title: "Sign out",
-            },
-            h(Icon, { name: "sign-out" }),
-          )
-        : null,
     ),
   );
 }
 
-function Header({
-  apiState,
-  conversationTitle,
-  view,
-  mode,
-  providerInfo,
-  sidebarCollapsed,
-  onToggleSidebar,
-  onProviderInfo,
-}) {
-  const providerDetail =
-    view === "memory"
-      ? "Review, confirm, edit, disable, expire, or delete everything Mind remembers"
-      : mode === "research"
-      ? `OpenAI Research Provider · ${
-          providerInfo.researchMode === "live"
-            ? "ready · calls may incur cost"
-            : "needs OPENAI_API_KEY"
-        }`
-      : providerInfo.billable
-        ? "DeepSeek Provider · model calls may incur cost"
-        : "Fake Provider · no model calls · no cloud cost";
-
+function Header({ sidebarCollapsed, onToggleSidebar }) {
   return h(
     "header",
     { className: "topbar" },
@@ -417,44 +442,87 @@ function Header({
         },
         h(Icon, { name: "sidebar-simple" }),
       ),
-      h(
-        "button",
-        {
-          className: "conversation-selector",
-          type: "button",
-          onClick: onProviderInfo,
-          title: providerDetail,
-        },
-        h(
-          "span",
-          { className: "conversation-selector-copy" },
-          h("strong", null, conversationTitle),
-          h(
-            "small",
-            null,
-            view === "memory"
-              ? "User-controlled context"
-              : mode === "research"
-              ? providerInfo.researchMode === "live"
-                ? "OpenAI research"
-                : "OpenAI key needed"
-              : providerInfo.billable
-                ? "DeepSeek model"
-                : "Local model",
-          ),
-        ),
-        h(Icon, { name: "caret-down" }),
-      ),
     ),
+  );
+}
+
+function AppDialog({
+  title,
+  description,
+  confirmLabel = "Confirm",
+  danger = false,
+  onCancel,
+  onConfirm,
+  children,
+}) {
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    function closeOnEscape(event) {
+      if (event.key === "Escape" && !busy) onCancel();
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busy, onCancel]);
+
+  async function confirm() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const shouldClose = await onConfirm();
+      if (shouldClose !== false) onCancel();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return h(
+    "div",
+    {
+      className: "dialog-backdrop",
+      onMouseDown: (event) => {
+        if (event.target === event.currentTarget && !busy) onCancel();
+      },
+    },
     h(
-      "span",
-      { className: `api-status ${apiState}` },
-      h("span", { className: "status-dot" }),
-      apiState === "online"
-        ? "Local API ready"
-        : apiState === "checking"
-          ? "Checking API"
-          : "API offline",
+      "section",
+      {
+        className: "dialog-card",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": "mind-dialog-title",
+      },
+      h(
+        "div",
+        { className: "dialog-heading" },
+        h("h2", { id: "mind-dialog-title" }, title),
+        description ? h("p", null, description) : null,
+      ),
+      children ? h("div", { className: "dialog-body" }, children) : null,
+      h(
+        "div",
+        { className: "dialog-actions" },
+        h(
+          "button",
+          {
+            className: "secondary",
+            type: "button",
+            onClick: onCancel,
+            disabled: busy,
+          },
+          "Cancel",
+        ),
+        h(
+          "button",
+          {
+            className: danger ? "danger" : "primary",
+            type: "button",
+            onClick: confirm,
+            disabled: busy,
+          },
+          busy ? "Working…" : confirmLabel,
+        ),
+      ),
     ),
   );
 }
@@ -466,7 +534,7 @@ function Welcome() {
     h(
       "span",
       { className: "welcome-mark", "aria-hidden": "true" },
-      h(Icon, { name: "star-four", weight: "fill" }),
+      h(Icon, { name: "snowflake" }),
     ),
     h("h2", null, "What should we make sense of?"),
   );
@@ -485,7 +553,7 @@ function SuggestionList({ onSuggestion }) {
           key: suggestion.title,
           onClick: () => onSuggestion(suggestion.prompt),
         },
-        h(Icon, { name: "star-four", weight: "fill" }),
+        h(Icon, { name: "arrow-up-right" }),
         h("span", null, suggestion.title),
       ),
     ),
@@ -502,7 +570,9 @@ function ResearchProgress({ research, onResume }) {
   );
   const currentStage = research.status === "queued" ? 0 : stageIndex;
   const completedAll = research.status === "completed";
-  const active = !["completed", "failed", "cancelled"].includes(research.status);
+  const active = !["completed", "failed", "cancelled"].includes(
+    research.status,
+  );
   const taskSummary =
     research.totalSubtasks > 0
       ? `${research.completedSubtasks ?? 0}/${research.totalSubtasks} tasks`
@@ -517,8 +587,7 @@ function ResearchProgress({ research, onResume }) {
       : null;
   const hardMaxTotalToolCalls =
     research.hardMaxTotalToolCalls ??
-    ((research.maxTotalToolCalls ?? 0) +
-      (research.maxToolCallOverrun ?? 0));
+    (research.maxTotalToolCalls ?? 0) + (research.maxToolCallOverrun ?? 0);
   const hardBudgetReached =
     research.hardBudgetReached ||
     (hardMaxTotalToolCalls > 0 &&
@@ -539,7 +608,8 @@ function ResearchProgress({ research, onResume }) {
         "span",
         { className: `research-state ${research.status ?? "queued"}` },
         h(Icon, {
-          name: research.status === "completed" ? "check-circle" : "spinner-gap",
+          name:
+            research.status === "completed" ? "check-circle" : "spinner-gap",
         }),
         researchStatusLabels[research.status] ?? "Preparing research",
       ),
@@ -587,11 +657,7 @@ function ResearchProgress({ research, onResume }) {
           "Preparing the Research Brief",
       ),
       budgetWarning
-        ? h(
-            "span",
-            { className: "research-budget-warning" },
-            budgetWarning,
-          )
+        ? h("span", { className: "research-budget-warning" }, budgetWarning)
         : active
           ? h("span", null, "This can take several minutes.")
           : null,
@@ -646,14 +712,11 @@ function Message({ message, onResumeResearch }) {
     h(
       "div",
       { className: "message-avatar", "aria-hidden": "true" },
-      message.role === "assistant"
-        ? h(Icon, { name: "star-four", weight: "fill" })
-        : "FY",
+      message.role === "assistant" ? h(Icon, { name: "snowflake" }) : "FY",
     ),
     h(
       "div",
       { className: "message-body" },
-      h("div", { className: "message-label" }, message.role === "assistant" ? "MIND" : "YOU"),
       h(
         "div",
         { className: "message-content" },
@@ -690,7 +753,11 @@ function Conversation({ messages, endRef, onResumeResearch }) {
 function ModeSwitch({ mode, onModeChange }) {
   return h(
     "div",
-    { className: "composer-mode-switch", role: "group", "aria-label": "Agent mode" },
+    {
+      className: "composer-mode-switch",
+      role: "group",
+      "aria-label": "Agent mode",
+    },
     [
       { value: "chat", label: "Chat", icon: "chat-circle" },
       { value: "research", label: "Research", icon: "magnifying-glass" },
@@ -773,7 +840,10 @@ function Composer({
           h("span", { className: "toolbar-divider", "aria-hidden": "true" }),
           h(
             "label",
-            { className: "tool-button", title: "Stage a file for the next phase" },
+            {
+              className: "tool-button",
+              title: "Stage a file for the next phase",
+            },
             h(Icon, { name: "paperclip" }),
             h("input", { type: "file", multiple: true, onChange: onFiles }),
           ),
@@ -791,13 +861,6 @@ function Composer({
         h(
           "div",
           { className: "composer-actions" },
-          h(
-            "span",
-            { className: "context-meter" },
-            h("span", { className: "context-dot", "aria-hidden": "true" }),
-            h("span", null, "Local context"),
-            h(Icon, { name: "caret-down" }),
-          ),
           isStreaming
             ? h(
                 "button",
@@ -828,11 +891,15 @@ function Composer({
 
 function friendlyAuthError(error) {
   const code = error?.code ?? "";
-  if (code.includes("invalid-credential")) return "Email or password is incorrect.";
-  if (code.includes("email-already-in-use")) return "An account already uses this email.";
-  if (code.includes("weak-password")) return "Use a password with at least six characters.";
+  if (code.includes("invalid-credential"))
+    return "Email or password is incorrect.";
+  if (code.includes("email-already-in-use"))
+    return "An account already uses this email.";
+  if (code.includes("weak-password"))
+    return "Use a password with at least six characters.";
   if (code.includes("invalid-email")) return "Enter a valid email address.";
-  if (code.includes("too-many-requests")) return "Too many attempts. Please wait and retry.";
+  if (code.includes("too-many-requests"))
+    return "Too many attempts. Please wait and retry.";
   return "Authentication could not be completed. Please try again.";
 }
 
@@ -876,7 +943,7 @@ function AuthScreen({ service }) {
         h(
           "span",
           { className: "brand-mark", "aria-hidden": "true" },
-          h(Icon, { name: "star-four", weight: "fill" }),
+          h(Icon, { name: "snowflake" }),
         ),
         h("span", null, "Mind"),
       ),
@@ -925,7 +992,8 @@ function AuthScreen({ service }) {
               h("span", null, "Password"),
               h("input", {
                 type: "password",
-                autoComplete: view === "register" ? "new-password" : "current-password",
+                autoComplete:
+                  view === "register" ? "new-password" : "current-password",
                 value: password,
                 onChange: (event) => setPassword(event.target.value),
                 minLength: 6,
@@ -1000,17 +1068,24 @@ function VerifyEmailScreen({ service, user }) {
     h(
       "section",
       { className: "auth-card verification-card" },
-      h("span", { className: "verification-icon" }, h(Icon, { name: "envelope" })),
+      h(
+        "span",
+        { className: "verification-icon" },
+        h(Icon, { name: "envelope" }),
+      ),
       h("h1", null, "Verify your email"),
       h("p", null, `We sent a verification link to ${user.email}.`),
-      feedback ? h("p", { className: "auth-feedback success" }, feedback) : null,
+      feedback
+        ? h("p", { className: "auth-feedback success" }, feedback)
+        : null,
       h(
         "button",
         {
           className: "auth-submit",
           type: "button",
           disabled: busy,
-          onClick: () => run(() => service.refreshUser(), "Verification status refreshed."),
+          onClick: () =>
+            run(() => service.refreshUser(), "Verification status refreshed."),
         },
         "I have verified my email",
       ),
@@ -1022,11 +1097,19 @@ function VerifyEmailScreen({ service, user }) {
           {
             type: "button",
             disabled: busy,
-            onClick: () => run(() => service.resendVerification(), "Verification email sent again."),
+            onClick: () =>
+              run(
+                () => service.resendVerification(),
+                "Verification email sent again.",
+              ),
           },
           "Resend email",
         ),
-        h("button", { type: "button", onClick: () => service.logout() }, "Sign out"),
+        h(
+          "button",
+          { type: "button", onClick: () => service.logout() },
+          "Sign out",
+        ),
       ),
     ),
   );
@@ -1050,9 +1133,12 @@ function memorySourceTitle(memory) {
     return "This memory was added manually.";
   }
   const parts = [`Source: ${provenance.source_kind}`];
-  if (provenance.conversation_id) parts.push(`Conversation: ${provenance.conversation_id}`);
-  if (provenance.research_job_id) parts.push(`Research job: ${provenance.research_job_id}`);
-  if (provenance.source_message_id) parts.push(`Message: ${provenance.source_message_id}`);
+  if (provenance.conversation_id)
+    parts.push(`Conversation: ${provenance.conversation_id}`);
+  if (provenance.research_job_id)
+    parts.push(`Research job: ${provenance.research_job_id}`);
+  if (provenance.source_message_id)
+    parts.push(`Message: ${provenance.source_message_id}`);
   return parts.join("\n");
 }
 
@@ -1075,6 +1161,58 @@ function memoryTypeLabel(type) {
   return type ? `${type.charAt(0).toUpperCase()}${type.slice(1)}` : "Memory";
 }
 
+const memoryTypes = ["goal", "preference", "project", "fact", "decision"];
+
+function MemoryTypeSelect({ value, onValueChange }) {
+  return h(
+    RadixSelect.Root,
+    { value, onValueChange },
+    h(
+      RadixSelect.Trigger,
+      { className: "memory-type-select", "aria-label": "Memory type" },
+      h(RadixSelect.Value),
+      h(
+        RadixSelect.Icon,
+        { asChild: true },
+        h(Icon, { name: "caret-down" }),
+      ),
+    ),
+    h(
+      RadixSelect.Portal,
+      null,
+      h(
+        RadixSelect.Content,
+        {
+          className: "memory-type-content",
+          position: "popper",
+          sideOffset: 6,
+          align: "start",
+        },
+        h(
+          RadixSelect.Viewport,
+          { className: "memory-type-viewport" },
+          memoryTypes.map((memoryType) =>
+            h(
+              RadixSelect.Item,
+              {
+                className: "memory-type-item",
+                key: memoryType,
+                value: memoryType,
+              },
+              h(
+                RadixSelect.ItemIndicator,
+                { className: "memory-type-indicator" },
+                h(Icon, { name: "check" }),
+              ),
+              h(RadixSelect.ItemText, null, memoryTypeLabel(memoryType)),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 function memoryUpdatedLabel(memory) {
   if (!memory.updated_at) return "";
   const date = new Date(memory.updated_at);
@@ -1082,7 +1220,8 @@ function memoryUpdatedLabel(memory) {
   return new Intl.DateTimeFormat("en", {
     month: "short",
     day: "numeric",
-    year: date.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
+    year:
+      date.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
   }).format(date);
 }
 
@@ -1114,13 +1253,20 @@ function MemoryLedger({
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState(focusId ?? null);
+  const [editor, setEditor] = useState(null);
   const query = search.trim().toLocaleLowerCase();
-  const visibleMemories = memories.filter((memory) => memoryMatchesSearch(memory, query));
+  const visibleMemories = memories.filter((memory) =>
+    memoryMatchesSearch(memory, query),
+  );
   const reviewItems = visibleMemories.filter((memory) =>
     ["candidate", "conflict", "stale"].includes(memory.status),
   );
-  const confirmed = visibleMemories.filter((memory) => memory.status === "active");
-  const superseded = visibleMemories.filter((memory) => memory.status === "superseded");
+  const confirmed = visibleMemories.filter(
+    (memory) => memory.status === "active",
+  );
+  const superseded = visibleMemories.filter(
+    (memory) => memory.status === "superseded",
+  );
   const memoriesById = new Map(memories.map((memory) => [memory.id, memory]));
 
   useEffect(() => {
@@ -1141,42 +1287,59 @@ function MemoryLedger({
     setSaving(false);
   }
 
-  async function editMemory(memory) {
-    const content = window.prompt("Edit what Mind should remember:", memory.content);
-    if (content === null || !content.trim() || content.trim() === memory.content) return;
-    await onUpdate(memory.id, { content: content.trim() });
+  function editMemory(memory) {
+    setEditor({ kind: "content", memory, value: memory.content, error: "" });
   }
 
-  async function setExpiry(memory) {
+  function setExpiry(memory) {
     const current = memory.expires_at ? memory.expires_at.slice(0, 10) : "";
-    const value = window.prompt(
-      "Expiry date (YYYY-MM-DD). Leave empty to keep this memory indefinitely:",
-      current,
-    );
-    if (value === null) return;
-    if (!value.trim()) {
-      await onUpdate(memory.id, { expires_at: null });
-      return;
+    setEditor({ kind: "expiry", memory, value: current, error: "" });
+  }
+
+  async function saveEditor() {
+    if (!editor) return false;
+    const value = editor.value.trim();
+    if (editor.kind === "content") {
+      if (!value) {
+        setEditor((current) => ({
+          ...current,
+          error: "Memory text cannot be empty.",
+        }));
+        return false;
+      }
+      if (value !== editor.memory.content) {
+        await onUpdate(editor.memory.id, { content: value });
+      }
+      return true;
     }
-    const expiresAt = new Date(`${value.trim()}T23:59:59.999Z`);
+
+    if (!value) {
+      await onUpdate(editor.memory.id, { expires_at: null });
+      return true;
+    }
+    const expiresAt = new Date(`${value}T23:59:59.999Z`);
     if (Number.isNaN(expiresAt.getTime())) {
-      window.alert("Use a date such as 2026-12-31.");
-      return;
+      setEditor((current) => ({ ...current, error: "Choose a valid date." }));
+      return false;
     }
-    await onUpdate(memory.id, { expires_at: expiresAt.toISOString() });
+    await onUpdate(editor.memory.id, { expires_at: expiresAt.toISOString() });
+    return true;
   }
 
   function memoryRow(memory) {
     const expired =
       memory.expires_at && new Date(memory.expires_at).getTime() <= Date.now();
-    const needsReview = ["candidate", "conflict", "stale"].includes(memory.status);
+    const needsReview = ["candidate", "conflict", "stale"].includes(
+      memory.status,
+    );
     const previous = memory.supersedes_id
       ? memoriesById.get(memory.supersedes_id)
       : null;
     const expanded = expandedId === memory.id;
     const facets = Array.isArray(memory.facets) ? memory.facets : [];
     const preview = facets.find(
-      (facet) => facet.toLocaleLowerCase() !== memory.content.toLocaleLowerCase(),
+      (facet) =>
+        facet.toLocaleLowerCase() !== memory.content.toLocaleLowerCase(),
     );
     const updatedLabel = memoryUpdatedLabel(memory);
     return h(
@@ -1217,35 +1380,66 @@ function MemoryLedger({
               weight: memory.pinned ? "fill" : "regular",
             }),
           ),
-          h("span", { className: `memory-type type-${memory.type}` }, memoryTypeLabel(memory.type)),
+          h(
+            "span",
+            { className: `memory-type type-${memory.type}` },
+            memoryTypeLabel(memory.type),
+          ),
           h(
             "span",
             { className: "memory-row-copy" },
             h("strong", null, memory.content),
             preview ? h("span", null, preview) : null,
           ),
-          h(
-            "span",
-            { className: "memory-row-source", title: memorySourceTitle(memory) },
-            h("span", null, memorySourceLabel(memory)),
-            h("span", null, updatedLabel ? `Updated ${updatedLabel}` : ""),
-          ),
-          needsReview
-            ? h("span", { className: `memory-state status-${memory.status}` }, memoryReviewLabel(memory))
-            : memory.status === "superseded"
-              ? h("span", { className: "memory-state status-superseded" }, "History")
-              : h("span", { className: "memory-state enabled" }, memory.enabled ? "Enabled" : "Off"),
-          h(Icon, { name: "caret-down", className: "memory-row-caret" }),
         ),
+        needsReview
+          ? h(
+              "div",
+              { className: "memory-row-state-control" },
+              h(
+                "span",
+                { className: `memory-state status-${memory.status}` },
+                memoryReviewLabel(memory),
+              ),
+            )
+          : memory.status === "superseded"
+            ? h(
+                "div",
+                { className: "memory-row-state-control" },
+                h(
+                  "span",
+                  { className: "memory-state status-superseded" },
+                  "History",
+                ),
+              )
+            : h(
+                "div",
+                { className: "memory-row-state-control has-switch" },
+                h(
+                  RadixSwitch.Root,
+                  {
+                    className: "memory-switch",
+                    checked: memory.enabled,
+                    onCheckedChange: (checked) =>
+                      onUpdate(memory.id, { enabled: checked }),
+                    "aria-label": `${memory.enabled ? "Disable" : "Enable"} ${memory.content}`,
+                  },
+                  h(RadixSwitch.Thumb, { className: "memory-switch-thumb" }),
+                ),
+                h(
+                  "span",
+                  { className: "memory-enabled-label" },
+                  memory.enabled ? "Enabled" : "Off",
+                ),
+              ),
         h(
-          "button",
+          "span",
           {
-            type: "button",
-            className: "memory-more",
-            onClick: () => setExpandedId(expanded ? null : memory.id),
-            "aria-label": expanded ? "Collapse memory details" : "Open memory actions",
+            className: "memory-row-source",
+            title: memorySourceTitle(memory),
           },
-          h(Icon, { name: "dots-three", weight: "bold" }),
+          h("span", null, memorySourceLabel(memory)),
+          h("span", null, updatedLabel ? `Updated ${updatedLabel}` : ""),
         ),
       ),
       expanded
@@ -1255,7 +1449,12 @@ function MemoryLedger({
             h(
               "dl",
               { className: "memory-detail-meta" },
-              h("div", null, h("dt", null, "Confidence"), h("dd", null, `${Math.round((memory.confidence ?? 1) * 100)}%`)),
+              h(
+                "div",
+                null,
+                h("dt", null, "Confidence"),
+                h("dd", null, `${Math.round((memory.confidence ?? 1) * 100)}%`),
+              ),
               h(
                 "div",
                 null,
@@ -1270,12 +1469,21 @@ function MemoryLedger({
                     : "No expiry",
                 ),
               ),
-              h("div", null, h("dt", null, "Revision"), h("dd", null, memory.revision ?? 1)),
+              h(
+                "div",
+                null,
+                h("dt", null, "Revision"),
+                h("dd", null, memory.revision ?? 1),
+              ),
               h(
                 "div",
                 null,
                 h("dt", null, "Source"),
-                h("dd", { title: memorySourceTitle(memory) }, memorySourceLabel(memory)),
+                h(
+                  "dd",
+                  { title: memorySourceTitle(memory) },
+                  memorySourceLabel(memory),
+                ),
               ),
             ),
             facets.length
@@ -1286,7 +1494,9 @@ function MemoryLedger({
                   h(
                     "ul",
                     null,
-                    facets.map((facet, index) => h("li", { key: `${memory.id}-facet-${index}` }, facet)),
+                    facets.map((facet, index) =>
+                      h("li", { key: `${memory.id}-facet-${index}` }, facet),
+                    ),
                   ),
                 )
               : null,
@@ -1294,7 +1504,13 @@ function MemoryLedger({
               ? h(
                   "div",
                   { className: "memory-previous" },
-                  h("span", null, memory.status === "conflict" ? "Conflicts with" : "Previous version"),
+                  h(
+                    "span",
+                    null,
+                    memory.status === "conflict"
+                      ? "Conflicts with"
+                      : "Previous version",
+                  ),
                   h("p", null, previous.content),
                 )
               : null,
@@ -1304,27 +1520,22 @@ function MemoryLedger({
               needsReview
                 ? h(
                     "button",
-                    { type: "button", className: "primary", onClick: () => onConfirm(memory.id) },
+                    {
+                      type: "button",
+                      className: "primary",
+                      onClick: () => onConfirm(memory.id),
+                    },
                     h(Icon, { name: "check" }),
                     memoryConfirmLabel(memory),
                   )
-                : memory.status === "active"
-                  ? h(
-                      "button",
-                      {
-                        type: "button",
-                        onClick: () => onUpdate(memory.id, { enabled: !memory.enabled }),
-                      },
-                      h(Icon, { name: memory.enabled ? "pause" : "play" }),
-                      memory.enabled ? "Disable" : "Enable",
-                    )
-                  : null,
+                : null,
               memory.status !== "superseded"
                 ? h(
                     "button",
                     {
                       type: "button",
-                      onClick: () => onUpdate(memory.id, { pinned: !memory.pinned }),
+                      onClick: () =>
+                        onUpdate(memory.id, { pinned: !memory.pinned }),
                     },
                     h(Icon, { name: "push-pin" }),
                     memory.pinned ? "Unpin" : "Pin",
@@ -1348,7 +1559,11 @@ function MemoryLedger({
                 : null,
               h(
                 "button",
-                { type: "button", className: "danger", onClick: () => onDelete(memory) },
+                {
+                  type: "button",
+                  className: "danger",
+                  onClick: () => onDelete(memory),
+                },
                 h(Icon, { name: "trash" }),
                 "Delete",
               ),
@@ -1407,13 +1622,9 @@ function MemoryLedger({
       "form",
       { className: "memory-create", onSubmit: submitMemory },
       h(Icon, { name: "plus", className: "memory-create-icon" }),
-      h("select", {
+      h(MemoryTypeSelect, {
         value: type,
-        onChange: (event) => setType(event.target.value),
-        "aria-label": "Memory type",
-        children: ["goal", "preference", "project", "fact", "decision"].map((value) =>
-          h("option", { value, key: value }, value),
-        ),
+        onValueChange: setType,
       }),
       h("input", {
         value: draft,
@@ -1424,14 +1635,14 @@ function MemoryLedger({
       }),
       h(
         "button",
-        { type: "submit", disabled: saving || !draft.trim() },
+        {
+          className: "memory-create-submit",
+          type: "submit",
+          disabled: saving || !draft.trim(),
+        },
         saving ? "Saving…" : "Add",
       ),
-      h(
-        "small",
-        null,
-        "Sensitive credentials are rejected and never saved.",
-      ),
+      h("small", null, "Sensitive credentials are rejected and never saved."),
     ),
     reviewItems.length
       ? h(
@@ -1459,10 +1670,16 @@ function MemoryLedger({
         ? h("div", { className: "memory-list" }, confirmed.map(memoryRow))
         : !query
           ? h(
-            "div",
-            { className: "memory-empty" },
-            h(Icon, { name: "diamond" }),
-            h("p", null, loading ? "Loading your Memory Ledger…" : "No confirmed memories yet."),
+              "div",
+              { className: "memory-empty" },
+              h(Icon, { name: "diamond" }),
+              h(
+                "p",
+                null,
+                loading
+                  ? "Loading your Memory Ledger…"
+                  : "No confirmed memories yet.",
+              ),
             )
           : null,
     ),
@@ -1486,6 +1703,51 @@ function MemoryLedger({
             h(Icon, { name: "caret-down" }),
           ),
           h("div", { className: "memory-list" }, superseded.map(memoryRow)),
+        )
+      : null,
+    editor
+      ? h(
+          AppDialog,
+          {
+            title: editor.kind === "content" ? "Edit memory" : "Set an expiry",
+            description:
+              editor.kind === "content"
+                ? "Update the information Mind may use in future conversations."
+                : "Leave the date empty to keep this memory indefinitely.",
+            confirmLabel: "Save",
+            onCancel: () => setEditor(null),
+            onConfirm: saveEditor,
+          },
+          editor.kind === "content"
+            ? h("textarea", {
+                className: "dialog-field dialog-textarea",
+                value: editor.value,
+                onChange: (event) =>
+                  setEditor((current) => ({
+                    ...current,
+                    value: event.target.value,
+                    error: "",
+                  })),
+                maxLength: 1000,
+                autoFocus: true,
+                "aria-label": "Memory text",
+              })
+            : h("input", {
+                className: "dialog-field",
+                type: "date",
+                value: editor.value,
+                onChange: (event) =>
+                  setEditor((current) => ({
+                    ...current,
+                    value: event.target.value,
+                    error: "",
+                  })),
+                autoFocus: true,
+                "aria-label": "Memory expiry date",
+              }),
+          editor.error
+            ? h("p", { className: "dialog-error" }, editor.error)
+            : null,
         )
       : null,
   );
@@ -1550,14 +1812,13 @@ function MemoryReviewNotice({ notice, onReview, onDismiss }) {
 }
 
 function App({ authSession }) {
-  const [apiState, setApiState] = useState("checking");
-  const [activeView, setActiveView] = useState("chat");
-  const [mode, setMode] = useState("chat");
+  const initialRoute = routeFromLocation();
+  const [activeView, setActiveView] = useState(initialRoute.view);
+  const [mode, setMode] = useState(initialRoute.mode);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [conversationId, setConversationId] = useState(null);
-  const [conversationTitle, setConversationTitle] = useState("New conversation");
   const [isStreaming, setIsStreaming] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [toast, setToast] = useState("");
@@ -1567,13 +1828,7 @@ function App({ authSession }) {
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryReviewNotice, setMemoryReviewNotice] = useState(null);
   const [memoryFocusId, setMemoryFocusId] = useState(null);
-  const [providerInfo, setProviderInfo] = useState({
-    name: "fake",
-    billable: false,
-    researchName: "openai",
-    researchBillable: true,
-    researchMode: "unavailable",
-  });
+  const [dialog, setDialog] = useState(null);
   const abortRef = useRef(null);
   const activeResearchJobRef = useRef(null);
   const activeAssistantRef = useRef(null);
@@ -1581,6 +1836,15 @@ function App({ authSession }) {
   const memoryReviewCount = memories.filter((memory) =>
     ["candidate", "conflict", "stale"].includes(memory.status),
   ).length;
+
+  function showRoute(view, nextMode = mode, { replace = false } = {}) {
+    const hash = routeHash(view, nextMode);
+    if (window.location.hash !== hash) {
+      window.history[replace ? "replaceState" : "pushState"](null, "", hash);
+    }
+    setActiveView(view);
+    setMode(nextMode);
+  }
 
   async function authorizationHeaders(extra = {}) {
     const token = await authSession.getToken();
@@ -1596,22 +1860,12 @@ function App({ authSession }) {
           headers,
         }),
       ]);
-      if (!healthResponse.ok || !response.ok) throw new Error("API unavailable");
-      const [health, payload] = await Promise.all([
-        healthResponse.json(),
-        response.json(),
-      ]);
+      if (!healthResponse.ok || !response.ok)
+        throw new Error("API unavailable");
+      const payload = await response.json();
       setConversations(payload.conversations);
-      setProviderInfo({
-        name: health.provider,
-        billable: health.billable_model_calls,
-        researchName: health.research_provider,
-        researchBillable: health.billable_research_calls,
-        researchMode: health.research_mode,
-      });
-      setApiState("online");
     } catch {
-      setApiState("offline");
+      setConversations([]);
     }
   }
 
@@ -1624,9 +1878,7 @@ function App({ authSession }) {
       if (!response.ok) throw new Error("Memory Ledger unavailable");
       const payload = await response.json();
       setMemories(payload.memories ?? []);
-      setApiState("online");
     } catch {
-      setApiState("offline");
       setToast("The Memory Ledger could not be loaded.");
     } finally {
       setMemoryLoading(false);
@@ -1634,8 +1886,21 @@ function App({ authSession }) {
   }
 
   useEffect(() => {
+    if (!window.location.hash)
+      showRoute(initialRoute.view, initialRoute.mode, { replace: true });
+    function syncRoute() {
+      const next = routeFromLocation();
+      setActiveView(next.view);
+      setMode(next.mode);
+    }
+    window.addEventListener("popstate", syncRoute);
+    window.addEventListener("hashchange", syncRoute);
     void loadConversations();
     void loadMemories();
+    return () => {
+      window.removeEventListener("popstate", syncRoute);
+      window.removeEventListener("hashchange", syncRoute);
+    };
   }, []);
 
   useEffect(() => {
@@ -1666,11 +1931,10 @@ function App({ authSession }) {
     activeResearchJobRef.current = null;
     activeAssistantRef.current = null;
     setConversationId(null);
-    setConversationTitle("New conversation");
     setMessages([]);
     setInput("");
     setAttachments([]);
-    setActiveView("chat");
+    showRoute("chat", "chat");
     setSidebarOpen(false);
   }
 
@@ -1679,8 +1943,7 @@ function App({ authSession }) {
     activeResearchJobRef.current = null;
     activeAssistantRef.current = null;
     setIsStreaming(false);
-    setApiState("checking");
-    setActiveView("chat");
+    showRoute("chat", mode);
     try {
       const response = await fetch(
         `${API_BASE}/api/conversations/${conversation.id}`,
@@ -1689,8 +1952,7 @@ function App({ authSession }) {
       if (!response.ok) throw new Error("Conversation unavailable");
       const payload = await response.json();
       setConversationId(payload.id);
-      setConversationTitle(payload.title);
-      setMode(payload.mode);
+      showRoute("chat", payload.mode);
       const hydratedMessages = await Promise.all(
         payload.messages.map(async (message) => {
           const baseMessage = {
@@ -1742,15 +2004,18 @@ function App({ authSession }) {
       setInput("");
       setAttachments([]);
       setSidebarOpen(false);
-      setApiState("online");
       const activeMessage = [...hydratedMessages]
         .reverse()
         .find(
           (message) =>
             message.research?.jobId &&
-            ["queued", "planning", "collecting", "verifying", "synthesizing"].includes(
-              message.research.status,
-            ),
+            [
+              "queued",
+              "planning",
+              "collecting",
+              "verifying",
+              "synthesizing",
+            ].includes(message.research.status),
         );
       if (activeMessage) {
         setIsStreaming(true);
@@ -1761,22 +2026,25 @@ function App({ authSession }) {
         });
       }
     } catch {
-      setApiState("offline");
       setToast("The conversation could not be opened.");
     }
   }
 
-  async function deleteConversation(conversation) {
-    const confirmed = window.confirm(
-      `Delete “${conversation.title}”? Any active Research task will be stopped and all messages will be permanently removed. This cannot be undone.`,
-    );
-    if (!confirmed) return;
+  function deleteConversation(conversation) {
+    setDialog({
+      title: "Delete conversation?",
+      description: `“${conversation.title}” and all of its messages will be permanently deleted. Any active Research task will also stop.`,
+      confirmLabel: "Delete",
+      danger: true,
+      onConfirm: () => performDeleteConversation(conversation),
+    });
+  }
 
+  async function performDeleteConversation(conversation) {
     if (conversation.id === conversationId) {
       abortRef.current?.abort();
       setIsStreaming(false);
     }
-    setApiState("checking");
     try {
       const response = await fetch(
         `${API_BASE}/api/conversations/${conversation.id}`,
@@ -1790,20 +2058,24 @@ function App({ authSession }) {
         current.filter((item) => item.id !== conversation.id),
       );
       if (conversation.id === conversationId) resetConversation();
-      setApiState("online");
       setToast("Conversation deleted.");
     } catch {
-      setApiState("offline");
       setToast("The conversation could not be deleted.");
     }
   }
 
-  async function deleteAccount() {
-    const confirmed = window.confirm(
-      "Delete your Mind account and all conversations and Research jobs? This cannot be undone.",
-    );
-    if (!confirmed) return;
+  function deleteAccount() {
+    setDialog({
+      title: "Delete your account?",
+      description:
+        "Your Mind account, conversations, memories, and Research jobs will be permanently deleted. This cannot be undone.",
+      confirmLabel: "Delete account",
+      danger: true,
+      onConfirm: performDeleteAccount,
+    });
+  }
 
+  async function performDeleteAccount() {
     try {
       const response = await fetch(`${API_BASE}/api/account`, {
         method: "DELETE",
@@ -1831,11 +2103,16 @@ function App({ authSession }) {
     try {
       const response = await fetch(`${API_BASE}/api/memories`, {
         method: "POST",
-        headers: await authorizationHeaders({ "Content-Type": "application/json" }),
+        headers: await authorizationHeaders({
+          "Content-Type": "application/json",
+        }),
         body: JSON.stringify(memory),
       });
       const payload = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(payload?.error?.message || "Memory could not be saved.");
+      if (!response.ok)
+        throw new Error(
+          payload?.error?.message || "Memory could not be saved.",
+        );
       setMemories((current) => [payload, ...current]);
       setToast("Memory added and enabled.");
       return true;
@@ -1847,19 +2124,28 @@ function App({ authSession }) {
 
   async function confirmMemory(memoryId) {
     const memory = memories.find((item) => item.id === memoryId);
-    if (
-      memory?.sensitivity === "sensitive" &&
-      !window.confirm(
-        "This memory may contain sensitive personal information. Confirm that Mind may use it in future model requests?",
-      )
-    ) {
+    if (memory?.sensitivity === "sensitive") {
+      setDialog({
+        title: "Use sensitive memory?",
+        description:
+          "This memory may contain sensitive personal information. Confirm that Mind may use it in future model requests.",
+        confirmLabel: "Confirm memory",
+        onConfirm: () => performConfirmMemory(memoryId, memory),
+      });
       return;
     }
+    await performConfirmMemory(memoryId, memory);
+  }
+
+  async function performConfirmMemory(memoryId, memory) {
     try {
-      const response = await fetch(`${API_BASE}/api/memories/${memoryId}/confirm`, {
-        method: "POST",
-        headers: await authorizationHeaders(),
-      });
+      const response = await fetch(
+        `${API_BASE}/api/memories/${memoryId}/confirm`,
+        {
+          method: "POST",
+          headers: await authorizationHeaders(),
+        },
+      );
       if (!response.ok) throw new Error("Memory confirmation failed.");
       await response.json();
       await loadMemories();
@@ -1880,11 +2166,14 @@ function App({ authSession }) {
     try {
       const response = await fetch(`${API_BASE}/api/memories/${memoryId}`, {
         method: "PATCH",
-        headers: await authorizationHeaders({ "Content-Type": "application/json" }),
+        headers: await authorizationHeaders({
+          "Content-Type": "application/json",
+        }),
         body: JSON.stringify(updates),
       });
       const payload = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(payload?.error?.message || "Memory update failed.");
+      if (!response.ok)
+        throw new Error(payload?.error?.message || "Memory update failed.");
       setMemories((current) =>
         current.map((item) => (item.id === memoryId ? payload : item)),
       );
@@ -1894,8 +2183,18 @@ function App({ authSession }) {
     }
   }
 
-  async function deleteMemory(memory) {
-    if (!window.confirm("Permanently delete this memory?")) return;
+  function deleteMemory(memory) {
+    setDialog({
+      title: "Delete memory?",
+      description:
+        "Mind will permanently forget this item. This cannot be undone.",
+      confirmLabel: "Delete",
+      danger: true,
+      onConfirm: () => performDeleteMemory(memory),
+    });
+  }
+
+  async function performDeleteMemory(memory) {
     try {
       const response = await fetch(`${API_BASE}/api/memories/${memory.id}`, {
         method: "DELETE",
@@ -1943,7 +2242,9 @@ function App({ authSession }) {
         },
       }));
       if (event.restarted) {
-        setToast("Started a new OpenAI research task; the cancelled response was not reused.");
+        setToast(
+          "Started a new OpenAI research task; the cancelled response was not reused.",
+        );
       }
     }
     if (event.type === "status") {
@@ -1970,7 +2271,9 @@ function App({ authSession }) {
     if (event.type === "source") {
       updateAssistantMessage(assistantId, (message) => {
         const currentSources = message.research?.sources ?? [];
-        const sources = currentSources.some((source) => source.id === event.source.id)
+        const sources = currentSources.some(
+          (source) => source.id === event.source.id,
+        )
           ? currentSources
           : [...currentSources, event.source];
         return {
@@ -1998,7 +2301,8 @@ function App({ authSession }) {
               totalToolCalls:
                 event.total_tool_calls ?? message.research.totalToolCalls,
               maxTotalToolCalls:
-                event.max_total_tool_calls ?? message.research.maxTotalToolCalls,
+                event.max_total_tool_calls ??
+                message.research.maxTotalToolCalls,
               maxToolCallOverrun:
                 event.max_tool_call_overrun ??
                 message.research.maxToolCallOverrun,
@@ -2008,8 +2312,7 @@ function App({ authSession }) {
               budgetExceeded:
                 event.budget_exceeded ?? message.research.budgetExceeded,
               hardBudgetReached:
-                event.hard_budget_reached ??
-                message.research.hardBudgetReached,
+                event.hard_budget_reached ?? message.research.hardBudgetReached,
             }
           : message.research,
       }));
@@ -2060,19 +2363,21 @@ function App({ authSession }) {
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
-      setApiState("online");
-      await readSseStream(response, (event) => handleStreamEvent(event, assistantId));
+      await readSseStream(response, (event) =>
+        handleStreamEvent(event, assistantId),
+      );
       setAttachments([]);
       await loadConversations();
     } catch (error) {
       if (error.name !== "AbortError") {
-        setApiState("offline");
         const publicMessage = error.isApiError
           ? error.message
           : "Mind could not complete the request. Check the API connection, then try again.";
         updateAssistantMessage(assistantId, (message) => ({
           ...message,
-          content: message.research ? message.content || publicMessage : publicMessage,
+          content: message.research
+            ? message.content || publicMessage
+            : publicMessage,
         }));
         setToast(
           "Connection interrupted. Reopen the conversation to restore the OpenAI research task.",
@@ -2091,7 +2396,11 @@ function App({ authSession }) {
     if (!text || isStreaming) return;
 
     const isResearch = mode === "research";
-    const userMessage = { id: crypto.randomUUID(), role: "user", content: text };
+    const userMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: text,
+    };
     const assistantId = crypto.randomUUID();
     setMessages((current) => [
       ...current,
@@ -2106,12 +2415,7 @@ function App({ authSession }) {
       },
     ]);
     setInput("");
-    if (!conversationId) {
-      setConversationTitle(text.replace(/\s+/g, " ").slice(0, 56));
-    }
     setIsStreaming(true);
-    setApiState("checking");
-
     await runStreamingRequest({
       endpoint: isResearch ? "/api/research" : "/api/chat",
       body: isResearch
@@ -2137,7 +2441,6 @@ function App({ authSession }) {
       research: { ...message.research, status: "queued" },
     }));
     setIsStreaming(true);
-    setApiState("checking");
     activeResearchJobRef.current = jobId;
     await runStreamingRequest({
       endpoint: `/api/research/${jobId}/resume`,
@@ -2151,10 +2454,13 @@ function App({ authSession }) {
     abortRef.current?.abort();
     if (jobId) {
       try {
-        const response = await fetch(`${API_BASE}/api/research/${jobId}/cancel`, {
-          method: "POST",
-          headers: await authorizationHeaders(),
-        });
+        const response = await fetch(
+          `${API_BASE}/api/research/${jobId}/cancel`,
+          {
+            method: "POST",
+            headers: await authorizationHeaders(),
+          },
+        );
         if (response.ok && assistantId) {
           updateAssistantMessage(assistantId, (message) => ({
             ...message,
@@ -2162,7 +2468,9 @@ function App({ authSession }) {
           }));
         }
       } catch {
-        setToast("The stream stopped, but the research status could not be updated.");
+        setToast(
+          "The stream stopped, but the research status could not be updated.",
+        );
       }
     }
     setIsStreaming(false);
@@ -2190,7 +2498,7 @@ function App({ authSession }) {
     onStop: stopStreaming,
     isStreaming,
     mode,
-    onModeChange: setMode,
+    onModeChange: (nextMode) => showRoute("chat", nextMode),
     attachments,
     onFiles: stageFiles,
     onVoice: () => setToast("Voice input is planned for phase 2."),
@@ -2223,7 +2531,7 @@ function App({ authSession }) {
     setIsStreaming(false);
     setMemoryFocusId(targetId);
     setMemoryReviewNotice(null);
-    setActiveView("memory");
+    showRoute("memory", "chat");
     setSidebarOpen(false);
     await loadMemories();
   }
@@ -2239,12 +2547,11 @@ function App({ authSession }) {
       setIsStreaming(false);
       setMemoryFocusId(null);
       setMemoryReviewNotice(null);
-      setActiveView("memory");
+      showRoute("memory", "chat");
       void loadMemories();
       return;
     }
-    setActiveView("chat");
-    if (item.mode) setMode(item.mode);
+    showRoute("chat", item.mode ?? "chat");
   }
 
   return h(
@@ -2264,7 +2571,6 @@ function App({ authSession }) {
         activeConversationId: conversationId,
         currentUser: authSession.user,
         activeView,
-        mode,
         onCollapse: collapseSidebar,
         onNewChat: resetConversation,
         onOpenConversation: openConversation,
@@ -2272,7 +2578,9 @@ function App({ authSession }) {
         onDeleteAccount:
           authService.mode === "firebase" ? deleteAccount : undefined,
         onSignOut:
-          authService.mode === "firebase" ? () => authSession.logout() : undefined,
+          authService.mode === "firebase"
+            ? () => authSession.logout()
+            : undefined,
         onNavigate: navigate,
         memoryReviewCount,
       }),
@@ -2281,22 +2589,11 @@ function App({ authSession }) {
       "main",
       { className: "main-panel" },
       h(Header, {
-        apiState,
-        conversationTitle: activeView === "memory" ? "Memory" : conversationTitle,
-        view: activeView,
-        mode,
-        providerInfo,
         sidebarCollapsed,
         onToggleSidebar: openSidebar,
-        onProviderInfo: () =>
-          setToast(
-            `Chat: ${providerInfo.billable ? "DeepSeek" : "Fake model"} · Research: OpenAI ${
-              providerInfo.researchMode === "live" ? "ready" : "needs OPENAI_API_KEY"
-            }`,
-          ),
       }),
       activeView === "memory"
-          ? h(MemoryLedger, {
+        ? h(MemoryLedger, {
             memories,
             loading: memoryLoading,
             focusId: memoryFocusId,
@@ -2307,33 +2604,39 @@ function App({ authSession }) {
             onDelete: deleteMemory,
           })
         : h(
-        "div",
-        { className: `workspace${messages.length ? " has-messages" : ""}` },
-        messages.length
-          ? h(
-              "div",
-              { className: "conversation-workspace" },
-              h(Conversation, {
-                messages,
-                endRef,
-                onResumeResearch: resumeResearch,
-              }),
-              h(Composer, composerProps),
-            )
-          : h(
-              "section",
-              { className: "empty-workspace" },
-              h(Welcome),
-              h(Composer, composerProps),
-              h(SuggestionList, { onSuggestion: selectSuggestion }),
-            ),
-      ),
+            "div",
+            { className: `workspace${messages.length ? " has-messages" : ""}` },
+            messages.length
+              ? h(
+                  "div",
+                  { className: "conversation-workspace" },
+                  h(Conversation, {
+                    messages,
+                    endRef,
+                    onResumeResearch: resumeResearch,
+                  }),
+                  h(Composer, composerProps),
+                )
+              : h(
+                  "section",
+                  { className: "empty-workspace" },
+                  h(Welcome),
+                  h(Composer, composerProps),
+                  h(SuggestionList, { onSuggestion: selectSuggestion }),
+                ),
+          ),
     ),
     memoryReviewNotice
       ? h(MemoryReviewNotice, {
           notice: memoryReviewNotice,
           onReview: openMemoryReview,
           onDismiss: () => setMemoryReviewNotice(null),
+        })
+      : null,
+    dialog
+      ? h(AppDialog, {
+          ...dialog,
+          onCancel: () => setDialog(null),
         })
       : null,
     toast ? h("div", { className: "toast", role: "status" }, toast) : null,
@@ -2347,7 +2650,11 @@ function ConfigurationError({ message }) {
     h(
       "section",
       { className: "auth-card verification-card" },
-      h("span", { className: "verification-icon error" }, h(Icon, { name: "warning" })),
+      h(
+        "span",
+        { className: "verification-icon error" },
+        h(Icon, { name: "warning" }),
+      ),
       h("h1", null, "Firebase configuration needed"),
       h("p", null, message),
     ),

@@ -24,6 +24,18 @@ async function resolveAsFile(candidate) {
       return path.resolve(filePath);
     }
   }
+  const nestedPackageJson = path.join(candidate, "package.json");
+  if (await fileExists(nestedPackageJson)) {
+    const packageDefinition = JSON.parse(await readFile(nestedPackageJson, "utf8"));
+    const entry =
+      packageDefinition.browser ??
+      packageDefinition.main ??
+      packageDefinition.module ??
+      "index.js";
+    if (typeof entry === "string") {
+      return resolveAsFile(path.resolve(candidate, entry));
+    }
+  }
   throw new Error(`Unable to resolve module: ${candidate}`);
 }
 
@@ -43,18 +55,17 @@ function selectExport(exportsValue) {
     return exportsValue;
   }
   if (exportsValue && typeof exportsValue === "object") {
-    const browserValue = exportsValue.browser;
-    if (typeof browserValue === "string") return browserValue;
-    if (browserValue && typeof browserValue === "object") {
-      if (typeof browserValue.require === "string") return browserValue.require;
-      if (typeof browserValue.default === "string") return browserValue.default;
-    }
-    if (typeof exportsValue.require === "string") return exportsValue.require;
-    if (typeof exportsValue.default === "string") return exportsValue.default;
-    const nodeValue = exportsValue.node;
-    if (nodeValue && typeof nodeValue === "object") {
-      if (typeof nodeValue.require === "string") return nodeValue.require;
-      if (typeof nodeValue.default === "string") return nodeValue.default;
+    for (const condition of [
+      "browser",
+      "production",
+      "require",
+      "default",
+      "node",
+      "import",
+      "development",
+    ]) {
+      const selected = selectExport(exportsValue[condition]);
+      if (selected) return selected;
     }
   }
   return undefined;
@@ -71,9 +82,13 @@ async function resolveSpecifier(specifier, importer) {
     await readFile(path.join(packageDirectory, "package.json"), "utf8"),
   );
   const exportKey = subpath ? `./${subpath}` : ".";
+  const packageEntry =
+    (typeof packageJson.browser === "string" && packageJson.browser) ||
+    packageJson.main ||
+    "index.js";
   const exportedPath =
     selectExport(packageJson.exports?.[exportKey]) ??
-    (subpath ? `./${subpath}.js` : packageJson.browser ?? packageJson.main ?? "index.js");
+    (subpath ? `./${subpath}` : packageEntry);
 
   return resolveAsFile(path.join(packageDirectory, exportedPath));
 }
@@ -176,6 +191,10 @@ export async function build() {
   await cp(
     path.join(root, "frontend", "index.html"),
     path.join(outputDirectory, "index.html"),
+  );
+  await cp(
+    path.join(root, "frontend", "favicon.svg"),
+    path.join(outputDirectory, "favicon.svg"),
   );
   await cp(
     path.join(root, "frontend", "styles.css"),

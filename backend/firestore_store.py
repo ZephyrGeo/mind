@@ -181,6 +181,7 @@ class FirestoreConversationRepository(_FirestoreRepository):
                 ConversationSummary(
                     id=payload.get("id", snapshot.id),
                     title=payload.get("title") or "New conversation",
+                    mode=payload.get("mode") or AgentMode.CHAT.value,
                     updated_at=payload["updated_at"],
                     message_count=max(0, int(payload.get("message_count", 0))),
                 )

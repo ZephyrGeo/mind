@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("built page contains the Mind product shell", async () => {
-  const html = await readFile(new URL("../dist/index.html", import.meta.url), "utf8");
+  const html = await readFile(
+    new URL("../dist/index.html", import.meta.url),
+    "utf8",
+  );
   const bundle = await readFile(
     new URL("../dist/assets/app.js", import.meta.url),
     "utf8",
@@ -14,12 +17,14 @@ test("built page contains the Mind product shell", async () => {
   );
 
   assert.match(html, /Mind — Personal AI workspace/);
+  assert.match(html, /rel="icon"[^>]+href="\/favicon\.svg"/);
+  await access(new URL("../dist/favicon.svg", import.meta.url));
   assert.match(html, /@phosphor-icons\/web@2\.1\.2/);
   assert.match(html, /\/runtime-config\.js/);
   assert.match(bundle, /What should we make sense of/);
-  assert.match(bundle, /Fake Provider · no model calls · no cloud cost/);
-  assert.match(bundle, /DeepSeek Provider · model calls may incur cost/);
-  assert.match(bundle, /OpenAI Research Provider/);
+  assert.doesNotMatch(bundle, /Fake Provider · no model calls · no cloud cost/);
+  assert.doesNotMatch(bundle, /DeepSeek Provider · model calls may incur cost/);
+  assert.doesNotMatch(bundle, /OpenAI Research Provider/);
   assert.match(bundle, /\/api\/health/);
   assert.match(bundle, /\/api\/conversations\/\$\{conversation\.id\}/);
   assert.match(bundle, /The conversation could not be opened/);
@@ -29,11 +34,16 @@ test("built page contains the Mind product shell", async () => {
   assert.match(bundle, /method:\s*"DELETE"/);
   assert.match(bundle, /This cannot be undone/);
   assert.match(bundle, /Search conversations/);
-  assert.match(bundle, /Previous 7 Days/);
-  assert.match(bundle, /Previous 30 Days/);
+  assert.match(bundle, /label:\s*"Chats"/);
+  assert.match(bundle, /conversation\.mode === "research"/);
+  assert.match(bundle, /collapsedSections/);
+  assert.match(bundle, /name:\s*"caret-down"/);
+  assert.match(bundle, /aria-expanded/);
+  assert.match(bundle, /No research yet/);
   assert.match(bundle, /composer-mode-switch/);
-  assert.match(bundle, /conversation-selector/);
-  assert.match(bundle, /name:\s*"star-four"/);
+  assert.doesNotMatch(bundle, /conversation-selector/);
+  assert.match(bundle, /name:\s*"snowflake"/);
+  assert.doesNotMatch(bundle, /className:\s*"message-label"/);
   assert.match(bundle, /Collapse sidebar/);
   assert.match(bundle, /sidebarCollapsed/);
   assert.doesNotMatch(source, /conversations\.slice\(0,\s*5\)/);
@@ -79,7 +89,25 @@ test("built page contains the Mind product shell", async () => {
   assert.match(bundle, /Research job:/);
   assert.match(bundle, /Conversation:/);
   assert.match(bundle, /Sensitive credentials are rejected and never saved/);
+  assert.match(source, /RadixSelect\.Root/);
+  assert.match(source, /RadixSwitch\.Root/);
+  assert.match(source, /className:\s*"memory-type-content"/);
+  assert.match(source, /className:\s*"memory-switch"/);
+  assert.doesNotMatch(source, /h\("select"/);
+  assert.doesNotMatch(source, /memory-row-caret|memory-more/);
   assert.match(bundle, /method:\s*"PATCH"/);
+  assert.match(bundle, /#\/memory/);
+  assert.match(bundle, /className:\s*"dialog-backdrop"/);
+  assert.doesNotMatch(source, /window\.(?:confirm|prompt|alert)/);
+  assert.doesNotMatch(source, /Local API ready/);
+  assert.doesNotMatch(
+    source,
+    /formatConversationTime|dateTime:\s*conversation\.updated_at/,
+  );
+  assert.doesNotMatch(
+    source,
+    /conversationGroupLabel|groupConversations|Previous 7 Days/,
+  );
 });
 
 test("built stylesheet includes responsive and reduced-motion behavior", async () => {
@@ -90,10 +118,17 @@ test("built stylesheet includes responsive and reduced-motion behavior", async (
   assert.match(css, /@media \(max-width: 650px\)/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /\.sidebar-container\.open/);
-  assert.match(css, /\.conversation-group-label/);
+  assert.match(css, /\.conversation-category-label/);
+  assert.match(css, /\.conversation-category\.collapsed \.category-caret/);
+  assert.match(css, /\.conversation-category-empty/);
+  assert.match(
+    css,
+    /\.composer-mode-switch button\.selected\s*\{[\s\S]*?background:\s*var\(--ink\)/,
+  );
+  assert.match(css, /\.composer-mode-switch\s*\{[\s\S]*?background:\s*#e8e8e8/);
   assert.match(css, /\.empty-workspace/);
   assert.match(css, /\.app-shell\.sidebar-collapsed/);
-  assert.match(css, /grid-template-columns:\s*300px minmax\(0, 1fr\)/);
+  assert.match(css, /grid-template-columns:\s*280px minmax\(0, 1fr\)/);
   assert.match(css, /overflow-y:\s*auto/);
   assert.match(css, /\.research-progress/);
   assert.match(css, /\.research-source-list/);
@@ -113,4 +148,10 @@ test("built stylesheet includes responsive and reduced-motion behavior", async (
   assert.match(css, /\.memory-review-notice/);
   assert.match(css, /\.nav-badge/);
   assert.match(css, /\.memory-row\.focused/);
+  assert.match(css, /\.profile-menu/);
+  assert.match(css, /\.dialog-card/);
+  assert.match(css, /--brand-ice:\s*#62bfe8/);
+  assert.match(css, /\.brand-mark\s*\{[\s\S]*?background:\s*transparent/);
+  assert.match(css, /\.welcome-mark\s*\{[\s\S]*?background:\s*transparent/);
+  assert.doesNotMatch(css, /Georgia|Times New Roman/);
 });

@@ -101,6 +101,7 @@ class JsonConversationRepository:
                 ConversationSummary(
                     id=conversation["id"],
                     title=conversation["title"],
+                    mode=conversation.get("mode") or AgentMode.CHAT.value,
                     updated_at=conversation["updated_at"],
                     message_count=len(conversation["messages"]),
                 )

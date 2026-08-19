@@ -521,6 +521,11 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertEqual(len(summaries), 1)
         self.assertEqual(str(summaries[0].id), events[-1]["conversation_id"])
         self.assertEqual(summaries[0].message_count, 2)
+        self.assertEqual(summaries[0].mode, AgentMode.CHAT)
+
+        listing = self.client.get("/api/conversations", headers=self.auth_headers)
+        self.assertEqual(listing.status_code, 200)
+        self.assertEqual(listing.json()["conversations"][0]["mode"], "chat")
 
         detail = self.client.get(
             f"/api/conversations/{events[-1]['conversation_id']}",
