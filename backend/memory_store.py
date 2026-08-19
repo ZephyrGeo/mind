@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
-from .memory_embedding import cosine_similarity
+from .memory_embedding import coerce_float_list, cosine_similarity
 from .models import Memory
 
 
@@ -143,7 +143,7 @@ class JsonMemoryRepository:
                 vector = item.get("_embedding")
                 if not isinstance(model, str) or not isinstance(vector, list):
                     return None
-                converted = _float_list(cast(list[object], vector))
+                converted = coerce_float_list(cast(list[object], vector))
                 return (model, converted) if converted is not None else None
         raise MemoryNotFoundError("Memory does not exist for this user.")
 
@@ -184,7 +184,7 @@ class JsonMemoryRepository:
                 raw_vector = item.get("_embedding")
                 if not isinstance(raw_vector, list):
                     continue
-                embedding = _float_list(cast(list[object], raw_vector))
+                embedding = coerce_float_list(cast(list[object], raw_vector))
                 if embedding is None:
                     continue
                 score = cosine_similarity(vector, embedding)
@@ -224,15 +224,3 @@ class JsonMemoryRepository:
 
 def _public_memory_payload(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if not key.startswith("_")}
-
-
-def _float_list(values: list[object]) -> list[float] | None:
-    converted: list[float] = []
-    for value in values:
-        if not isinstance(value, (int, float, str)):
-            return None
-        try:
-            converted.append(float(value))
-        except ValueError:
-            return None
-    return converted

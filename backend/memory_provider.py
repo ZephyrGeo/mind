@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from uuid import UUID
 
+from .memory_text import is_memory_question, normalize_memory_text
 from .models import Memory, MemorySourceKind, MemoryType
 
 
@@ -138,7 +139,8 @@ class RuleMemoryProvider:
                     action=(
                         MemoryProposalAction.IGNORE
                         if existing is not None
-                        and _normalized(existing.content) == _normalized(content)
+                        and normalize_memory_text(existing.content)
+                        == normalize_memory_text(content)
                         else MemoryProposalAction.UPDATE
                         if existing is not None
                         else MemoryProposalAction.CREATE
@@ -155,7 +157,7 @@ class RuleMemoryProvider:
             ]
         proposals: list[MemoryProposal] = []
         for segment in _segments(text):
-            if _is_question(segment):
+            if is_memory_question(segment):
                 continue
             memory_type = _classify(segment)
             if memory_type is None:
@@ -165,7 +167,8 @@ class RuleMemoryProvider:
                 (
                     memory
                     for memory in related_memories
-                    if _normalized(memory.content) == _normalized(normalized)
+                    if normalize_memory_text(memory.content)
+                    == normalize_memory_text(normalized)
                 ),
                 None,
             )
@@ -216,7 +219,7 @@ class RuleMemoryProvider:
                     content,
                     re.IGNORECASE,
                 )
-                or _is_question(content)
+                or is_memory_question(content)
             ):
                 continue
             memory_type = (
@@ -232,7 +235,8 @@ class RuleMemoryProvider:
                 (
                     memory
                     for memory in related_memories
-                    if _normalized(memory.content) == _normalized(content)
+                    if normalize_memory_text(memory.content)
+                    == normalize_memory_text(content)
                 ),
                 None,
             )
@@ -432,7 +436,7 @@ class OpenAIMemoryProvider:
                 )
             except (KeyError, TypeError, ValueError):
                 continue
-            if proposal.content and not _is_question(proposal.content):
+            if proposal.content and not is_memory_question(proposal.content):
                 proposals.append(proposal)
             if len(proposals) >= 6:
                 break
@@ -578,19 +582,6 @@ def _segments(value: str) -> list[str]:
     ]
 
 
-def _is_question(value: str) -> bool:
-    normalized = value.strip().casefold()
-    if normalized.endswith(("?", "？")):
-        return True
-    return bool(
-        re.match(
-            r"^(?:什么|谁|哪|如何|怎么|为什么|是否|能否|可以吗|"
-            r"what|who|which|how|why|do |does |did |is |are |can |could |would )",
-            normalized,
-        )
-    )
-
-
 def _classify(value: str) -> MemoryType | None:
     for memory_type, pattern in _TYPE_PATTERNS:
         if pattern.search(value):
@@ -609,7 +600,7 @@ def _canonical_content(value: str) -> str:
 
 
 def _canonical_key(memory_type: MemoryType, content: str) -> str:
-    return f"{memory_type.value}:{_normalized(content)[:240]}"
+    return f"{memory_type.value}:{normalize_memory_text(content)[:240]}"
 
 
 def _is_professional_profile_summary(value: str) -> bool:
@@ -671,7 +662,7 @@ def _consolidate_professional_profile(
     unique_content: list[str] = []
     normalized_content: set[str] = set()
     for proposal in actionable:
-        key = _normalized(proposal.content)
+        key = normalize_memory_text(proposal.content)
         if not key or key in normalized_content:
             continue
         normalized_content.add(key)
@@ -875,7 +866,7 @@ def _unique_texts(values: Iterable[str]) -> tuple[str, ...]:
     seen: set[str] = set()
     for value in values:
         normalized_value = " ".join(str(value).split())[:500]
-        key = _normalized(normalized_value)
+        key = normalize_memory_text(normalized_value)
         if not normalized_value or not key or key in seen:
             continue
         seen.add(key)
@@ -883,12 +874,6 @@ def _unique_texts(values: Iterable[str]) -> tuple[str, ...]:
         if len(result) >= 12:
             break
     return tuple(result)
-
-
-def _normalized(value: str) -> str:
-    return re.sub(r"[^\w\u3400-\u9fff]+", "", value.casefold())
-
-
 def _float_value(value: object) -> float:
     if not isinstance(value, (int, float, str)):
         raise TypeError("Expected a number.")

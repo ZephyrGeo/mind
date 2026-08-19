@@ -27,6 +27,7 @@ from .models import (
     MemoryUpdateRequest,
     utc_now,
 )
+from .memory_text import is_memory_question, normalize_memory_text
 from .repositories import MemoryRepository
 
 
@@ -100,7 +101,10 @@ class MemoryService:
         for memory in memories:
             # Retire legacy false-positive questions without silently deleting
             # their provenance from the user-controlled ledger.
-            if memory.status == MemoryStatus.CANDIDATE and _is_question(memory.content):
+            if (
+                memory.status == MemoryStatus.CANDIDATE
+                and is_memory_question(memory.content)
+            ):
                 memory = self.repository.save_memory(
                     memory.model_copy(
                         update={
@@ -133,11 +137,11 @@ class MemoryService:
 
     def create_memory(self, request: MemoryCreateRequest, user_id: str) -> Memory:
         self._reject_credentials(request.content)
-        normalized = _normalized(request.content)
+        normalized = normalize_memory_text(request.content)
         for existing in self.repository.list_memories(user_id):
             if (
                 existing.status != MemoryStatus.SUPERSEDED
-                and _normalized(existing.content) == normalized
+                and normalize_memory_text(existing.content) == normalized
             ):
                 if existing.status != MemoryStatus.ACTIVE or not existing.enabled:
                     return self.confirm_memory(existing.id, user_id)
@@ -189,7 +193,9 @@ class MemoryService:
             content = str(updates["content"])
             if "sensitivity" not in request.model_fields_set:
                 updates["sensitivity"] = _sensitivity(content)
-            updates["canonical_key"] = f"{memory.type.value}:{_normalized(content)[:240]}"
+            updates["canonical_key"] = (
+                f"{memory.type.value}:{normalize_memory_text(content)[:240]}"
+            )
             updates["facets"] = []
             updates["revision"] = memory.revision + 1
             updates["last_verified_at"] = utc_now()
@@ -335,7 +341,13 @@ class MemoryService:
         text: str,
         provenance: MemoryProvenance,
     ) -> list[Memory]:
-        related = self.retriever.related(user_id, text, limit=12)
+        existing_memories = self.repository.list_memories(user_id)
+        related = self.retriever.related(
+            user_id,
+            text,
+            limit=12,
+            memories=existing_memories,
+        )
         related_memories = [match.memory for match in related]
         try:
             proposals = self.provider.extract(
@@ -354,9 +366,22 @@ class MemoryService:
                 proposal=proposal,
                 provenance=provenance,
                 related_memories=related_memories,
+                existing_memories=existing_memories,
             )
             if memory is not None:
                 saved.append(memory)
+                removed_ids = {memory.id}
+                if (
+                    memory.status == MemoryStatus.ACTIVE
+                    and memory.supersedes_id is not None
+                ):
+                    removed_ids.add(memory.supersedes_id)
+                existing_memories[:] = [
+                    existing
+                    for existing in existing_memories
+                    if existing.id not in removed_ids
+                ]
+                existing_memories.append(memory)
         return saved
 
     def _apply_proposal(
@@ -366,20 +391,22 @@ class MemoryService:
         proposal: MemoryProposal,
         provenance: MemoryProvenance,
         related_memories: list[Memory],
+        existing_memories: list[Memory],
     ) -> Memory | None:
         if (
             proposal.action == MemoryProposalAction.IGNORE
             or not proposal.content
-            or _is_question(proposal.content)
+            or is_memory_question(proposal.content)
             or _contains_credentials(proposal.content)
         ):
             return None
         exact = next(
             (
                 existing
-                for existing in self.repository.list_memories(user_id)
+                for existing in existing_memories
                 if existing.status != MemoryStatus.SUPERSEDED
-                and _normalized(existing.content) == _normalized(proposal.content)
+                and normalize_memory_text(existing.content)
+                == normalize_memory_text(proposal.content)
             ),
             None,
         )
@@ -405,7 +432,7 @@ class MemoryService:
             related = next(
                 (
                     memory
-                    for memory in self.repository.list_memories(user_id)
+                    for memory in existing_memories
                     if memory.status != MemoryStatus.SUPERSEDED
                     and memory.canonical_key
                     and memory.canonical_key.casefold()
@@ -596,27 +623,10 @@ def _sensitivity(value: str) -> MemorySensitivity:
     )
 
 
-def _is_question(value: str) -> bool:
-    normalized = value.strip().casefold()
-    if normalized.endswith(("?", "？")):
-        return True
-    return bool(
-        re.match(
-            r"^(?:什么|谁|哪|如何|怎么|为什么|是否|能否|可以吗|"
-            r"what|who|which|how|why|do |does |did |is |are |can |could |would )",
-            normalized,
-        )
-    )
-
-
 def _only_questions(value: str) -> bool:
     segments = [
         " ".join(segment.split())
         for segment in re.split(r"(?<=[。！？!?\n])|(?<=[.!?])\s+", value)
         if " ".join(segment.split())
     ]
-    return bool(segments) and all(_is_question(segment) for segment in segments)
-
-
-def _normalized(value: str) -> str:
-    return re.sub(r"[^\w\u3400-\u9fff]+", "", value.casefold())
+    return bool(segments) and all(is_memory_question(segment) for segment in segments)

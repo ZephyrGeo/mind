@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Sequence
 from typing import Protocol
 
 from .memory_embedding import EmbeddingProvider, HashEmbeddingProvider
@@ -36,6 +37,7 @@ class MemoryRetriever(Protocol):
         text: str,
         *,
         limit: int,
+        memories: Sequence[Memory] | None = None,
     ) -> list[MemoryMatch]:
         """Return semantically related entries for reconciliation."""
 
@@ -48,7 +50,7 @@ class MemoryRetriever(Protocol):
 
 
 class LocalMemoryRetriever:
-    """Hybrid vector and lexical retrieval with a deterministic local embedder."""
+    """Hybrid vector and lexical retrieval over the configured repository."""
 
     def __init__(
         self,
@@ -89,16 +91,21 @@ class LocalMemoryRetriever:
         text: str,
         *,
         limit: int,
+        memories: Sequence[Memory] | None = None,
     ) -> list[MemoryMatch]:
-        memories = [
+        candidates = [
             memory
-            for memory in self.repository.list_memories(user_id)
+            for memory in (
+                memories
+                if memories is not None
+                else self.repository.list_memories(user_id)
+            )
             if memory.status != MemoryStatus.SUPERSEDED
         ]
         return self._rank(
             user_id,
             text,
-            memories,
+            candidates,
             limit=limit,
             threshold=max(0.55, self.semantic_threshold - 0.08),
         )
@@ -196,12 +203,6 @@ class LocalMemoryRetriever:
                     model=self.embedding_provider.model,
                     vector=vector,
                 )
-
-
-class FirestoreVectorRetriever(LocalMemoryRetriever):
-    """Production hybrid retriever backed by Firestore nearest-neighbor queries."""
-
-
 def _embedding_text(memory: Memory) -> str:
     if not memory.facets:
         return memory.content

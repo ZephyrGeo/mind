@@ -1178,6 +1178,7 @@ function MemoryLedger({
     const preview = facets.find(
       (facet) => facet.toLocaleLowerCase() !== memory.content.toLocaleLowerCase(),
     );
+    const updatedLabel = memoryUpdatedLabel(memory);
     return h(
       "article",
       {
@@ -1227,7 +1228,7 @@ function MemoryLedger({
             "span",
             { className: "memory-row-source", title: memorySourceTitle(memory) },
             h("span", null, memorySourceLabel(memory)),
-            h("span", null, memoryUpdatedLabel(memory) ? `Updated ${memoryUpdatedLabel(memory)}` : ""),
+            h("span", null, updatedLabel ? `Updated ${updatedLabel}` : ""),
           ),
           needsReview
             ? h("span", { className: `memory-state status-${memory.status}` }, memoryReviewLabel(memory))

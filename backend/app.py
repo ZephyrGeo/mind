@@ -39,7 +39,7 @@ from .firestore_store import (
 )
 from .memory_embedding import HashEmbeddingProvider, OpenAIEmbeddingProvider
 from .memory_provider import OpenAIMemoryProvider, RuleMemoryProvider
-from .memory_retrieval import FirestoreVectorRetriever, LocalMemoryRetriever
+from .memory_retrieval import LocalMemoryRetriever
 from .memory_service import (
     MemoryConfirmationRequiredError,
     MemoryContentRejectedError,
@@ -328,31 +328,41 @@ def create_app(
     runtime_research_provider = (
         research_provider or create_research_provider(runtime_settings)
     )
-    runtime_memory_repository = memory_repository or create_memory_repository(
-        runtime_settings
-    )
-    runtime_embedding_provider = create_embedding_provider(runtime_settings)
-    runtime_memory_provider = create_memory_provider(runtime_settings)
-    runtime_memory_retriever = (
-        FirestoreVectorRetriever(
+    if memory_service is None:
+        runtime_memory_repository = memory_repository or create_memory_repository(
+            runtime_settings
+        )
+        runtime_embedding_provider = create_embedding_provider(runtime_settings)
+        runtime_memory_provider = create_memory_provider(runtime_settings)
+        runtime_memory_retriever = LocalMemoryRetriever(
             runtime_memory_repository,
             runtime_embedding_provider,
             semantic_threshold=runtime_settings.memory_semantic_threshold,
         )
-        if runtime_settings.persistence_provider == "firestore"
-        else LocalMemoryRetriever(
-            runtime_memory_repository,
-            runtime_embedding_provider,
-            semantic_threshold=runtime_settings.memory_semantic_threshold,
+        runtime_memory_service = MemoryService(
+            repository=runtime_memory_repository,
+            retriever=runtime_memory_retriever,
+            provider=runtime_memory_provider,
+            retrieval_limit=runtime_settings.memory_retrieval_limit,
+            max_context_characters=runtime_settings.memory_max_context_characters,
         )
-    )
-    runtime_memory_service = memory_service or MemoryService(
-        repository=runtime_memory_repository,
-        retriever=runtime_memory_retriever,
-        provider=runtime_memory_provider,
-        retrieval_limit=runtime_settings.memory_retrieval_limit,
-        max_context_characters=runtime_settings.memory_max_context_characters,
-    )
+    else:
+        if (
+            memory_repository is not None
+            and memory_repository is not memory_service.repository
+        ):
+            raise ValueError(
+                "Injected MemoryService and MemoryRepository must use the same "
+                "repository."
+            )
+        runtime_memory_service = memory_service
+        runtime_memory_repository = memory_service.repository
+        runtime_memory_provider = memory_service.provider
+        runtime_embedding_provider = getattr(
+            memory_service.retriever,
+            "embedding_provider",
+            None,
+        )
     runtime_principal_verifier = (
         principal_verifier or create_principal_verifier(runtime_settings)
     )

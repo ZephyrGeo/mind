@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request
 
@@ -420,6 +421,28 @@ class MindFastAPIContractTest(unittest.TestCase):
                 "research_mode": "live",
             },
         )
+
+    def test_injected_memory_service_skips_provider_construction(self) -> None:
+        with (
+            patch("backend.app.create_memory_provider") as memory_provider_factory,
+            patch(
+                "backend.app.create_embedding_provider"
+            ) as embedding_provider_factory,
+        ):
+            application = create_app(
+                settings=self.settings,
+                repository=self.repository,
+                provider=self.provider,
+                research_repository=self.research_repository,
+                research_provider=self.research_provider,
+                memory_repository=self.memory_repository,
+                memory_service=self.memory_service,
+            )
+
+        memory_provider_factory.assert_not_called()
+        embedding_provider_factory.assert_not_called()
+        self.assertIs(application.state.memory_service, self.memory_service)
+        self.assertIs(application.state.memory_repository, self.memory_repository)
 
     def test_authentication_errors_use_the_standard_envelope(self) -> None:
         response = self.client.get("/api/conversations")

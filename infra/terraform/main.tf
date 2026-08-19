@@ -126,7 +126,7 @@ resource "google_firestore_index" "memory_embedding" {
   }
 
   deletion_policy = "ABANDON"
-  skip_wait        = true
+  skip_wait       = true
 
   depends_on = [google_project_service.required]
 }

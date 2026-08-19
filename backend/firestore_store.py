@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from typing import Any, cast
 from uuid import UUID
 
-from .memory_embedding import cosine_similarity
+from .memory_embedding import coerce_float_list, cosine_similarity
+from .memory_store import MemoryNotFoundError
 from .models import (
     AgentMode,
     Conversation,
@@ -20,7 +21,6 @@ from .models import (
     ResearchStatus,
 )
 from .research_store import ResearchJobNotFoundError
-from .memory_store import MemoryNotFoundError
 from .store import ConversationNotFoundError
 
 
@@ -47,10 +47,7 @@ def _vector_values(value: object) -> list[float]:
     raw = getattr(value, "value", value)
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
         return []
-    try:
-        return [float(item) for item in cast(Sequence[float], raw)]
-    except (TypeError, ValueError):
-        return []
+    return coerce_float_list(cast(Sequence[object], raw)) or []
 
 
 class _FirestoreRepository:
@@ -465,11 +462,14 @@ class FirestoreMemoryRepository(_FirestoreRepository):
             "updated_at",
             direction=self._descending,
         )
-        return [
-            Memory.model_validate(_public_memory_payload(snapshot.to_dict() or {}))
-            for snapshot in query.stream()
-            if (snapshot.to_dict() or {}).get("user_id") == user_id
-        ]
+        memories: list[Memory] = []
+        for snapshot in query.stream():
+            payload = cast(dict[str, Any], snapshot.to_dict() or {})
+            if payload.get("user_id") == user_id:
+                memories.append(
+                    Memory.model_validate(_public_memory_payload(payload))
+                )
+        return memories
 
     def get_memory(self, memory_id: UUID | str, user_id: str) -> Memory:
         snapshot = self._memory(user_id, memory_id).get()

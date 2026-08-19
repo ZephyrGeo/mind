@@ -160,7 +160,7 @@ class OpenAIEmbeddingProvider:
             raw_vector = item.get("embedding")
             if not isinstance(raw_index, int) or not isinstance(raw_vector, list):
                 continue
-            vector = _float_list(cast(list[object], raw_vector))
+            vector = coerce_float_list(cast(list[object], raw_vector))
             if vector is None:
                 continue
             if len(vector) == self.dimensions:
@@ -187,7 +187,9 @@ def _normalize(vector: Sequence[float]) -> list[float]:
     return [float(value / norm) for value in vector] if norm else [0.0] * len(vector)
 
 
-def _float_list(values: Sequence[object]) -> list[float] | None:
+def coerce_float_list(values: Sequence[object]) -> list[float] | None:
+    """Convert a provider or persistence vector to Python floats."""
+
     converted: list[float] = []
     for value in values:
         if not isinstance(value, (int, float, str)):

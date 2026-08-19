@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 import uuid
-import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from backend.memory_embedding import OpenAIEmbeddingProvider
 from backend.memory_provider import (
@@ -66,6 +67,24 @@ class MemoryServiceTest(unittest.TestCase):
         matches = self.service.retrieve("owner", "Mind 发布计划")
         self.assertTrue(confirmed.enabled)
         self.assertEqual([match.memory.id for match in matches], [confirmed.id])
+
+    def test_candidate_capture_reuses_one_loaded_ledger(self) -> None:
+        with patch.object(
+            self.repository,
+            "list_memories",
+            wraps=self.repository.list_memories,
+        ) as list_memories:
+            captured = self.service.capture_conversation_candidates(
+                user_id="owner",
+                conversation_id=uuid.uuid4(),
+                user_message=(
+                    "我的项目叫 Mind。"
+                    "我偏好用中文回答。"
+                ),
+            )
+
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(list_memories.call_count, 1)
 
     def test_questions_are_ignored_and_explicit_remember_is_immediately_active(self) -> None:
         conversation_id = uuid.uuid4()
