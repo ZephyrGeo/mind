@@ -32,10 +32,10 @@ const researchStages = [
 ];
 
 const navigation = [
-  { icon: "chat-circle", label: "Chat", active: true },
-  { icon: "magnifying-glass", label: "Research" },
-  { icon: "diamond", label: "Memory" },
-  { icon: "arrow-clockwise", label: "Heartbeats" },
+  { icon: "chat-circle", label: "Chat", view: "chat", mode: "chat" },
+  { icon: "magnifying-glass", label: "Research", view: "chat", mode: "research" },
+  { icon: "diamond", label: "Memory", view: "memory" },
+  { icon: "arrow-clockwise", label: "Heartbeats", view: "heartbeats" },
 ];
 
 const suggestions = [
@@ -168,12 +168,16 @@ function Sidebar({
   conversations,
   activeConversationId,
   currentUser,
+  activeView,
+  mode,
   onCollapse,
   onNewChat,
   onOpenConversation,
   onDeleteConversation,
   onDeleteAccount,
   onSignOut,
+  onNavigate,
+  memoryReviewCount = 0,
 }) {
   const [conversationQuery, setConversationQuery] = useState("");
   const searchRef = useRef(null);
@@ -224,17 +228,35 @@ function Sidebar({
       "nav",
       { className: "primary-nav", "aria-label": "Primary navigation" },
       navigation.map((item) =>
+        {
+          const active =
+            item.view === activeView &&
+            (item.view !== "chat" || item.mode === mode);
+          return (
         h(
           "button",
           {
-            className: `nav-item${item.active ? " active" : ""}`,
+            className: `nav-item${active ? " active" : ""}`,
             type: "button",
             key: item.label,
+            onClick: () => onNavigate(item),
           },
           h(Icon, { name: item.icon, className: "nav-symbol" }),
           h("span", null, item.label),
-          item.active ? h("span", { className: "nav-indicator" }) : null,
-        ),
+          item.view === "memory" && memoryReviewCount > 0
+            ? h(
+                "span",
+                {
+                  className: "nav-badge",
+                  "aria-label": `${memoryReviewCount} memories need review`,
+                },
+                memoryReviewCount > 99 ? "99+" : memoryReviewCount,
+              )
+            : null,
+          active ? h("span", { className: "nav-indicator" }) : null,
+        )
+          );
+        },
       ),
     ),
     h(
@@ -358,6 +380,7 @@ function Sidebar({
 function Header({
   apiState,
   conversationTitle,
+  view,
   mode,
   providerInfo,
   sidebarCollapsed,
@@ -365,7 +388,9 @@ function Header({
   onProviderInfo,
 }) {
   const providerDetail =
-    mode === "research"
+    view === "memory"
+      ? "Review, confirm, edit, disable, expire, or delete everything Mind remembers"
+      : mode === "research"
       ? `OpenAI Research Provider · ${
           providerInfo.researchMode === "live"
             ? "ready · calls may incur cost"
@@ -407,7 +432,9 @@ function Header({
           h(
             "small",
             null,
-            mode === "research"
+            view === "memory"
+              ? "User-controlled context"
+              : mode === "research"
               ? providerInfo.researchMode === "live"
                 ? "OpenAI research"
                 : "OpenAI key needed"
@@ -1005,8 +1032,525 @@ function VerifyEmailScreen({ service, user }) {
   );
 }
 
+function memorySourceLabel(memory) {
+  const kind = memory.provenance?.source_kind;
+  const sourceId =
+    kind === "research_report"
+      ? memory.provenance?.research_job_id
+      : memory.provenance?.conversation_id;
+  const reference = sourceId ? ` · ${String(sourceId).slice(0, 8)}` : "";
+  if (kind === "conversation") return `Conversation${reference}`;
+  if (kind === "research_report") return `Research report${reference}`;
+  return "Added by you";
+}
+
+function memorySourceTitle(memory) {
+  const provenance = memory.provenance;
+  if (!provenance || provenance.source_kind === "manual") {
+    return "This memory was added manually.";
+  }
+  const parts = [`Source: ${provenance.source_kind}`];
+  if (provenance.conversation_id) parts.push(`Conversation: ${provenance.conversation_id}`);
+  if (provenance.research_job_id) parts.push(`Research job: ${provenance.research_job_id}`);
+  if (provenance.source_message_id) parts.push(`Message: ${provenance.source_message_id}`);
+  return parts.join("\n");
+}
+
+function memoryReviewLabel(memory) {
+  if (memory.status === "conflict") return "Conflict";
+  if (memory.status === "stale") return "Needs revalidation";
+  if (memory.review_reason === "update") return "Update suggested";
+  if (memory.review_reason === "research") return "From Research";
+  return "Needs review";
+}
+
+function memoryConfirmLabel(memory) {
+  if (memory.status === "conflict") return "Use this version";
+  if (memory.status === "stale") return "Reconfirm";
+  if (memory.review_reason === "update") return "Apply update";
+  return "Confirm memory";
+}
+
+function memoryTypeLabel(type) {
+  return type ? `${type.charAt(0).toUpperCase()}${type.slice(1)}` : "Memory";
+}
+
+function memoryUpdatedLabel(memory) {
+  if (!memory.updated_at) return "";
+  const date = new Date(memory.updated_at);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    year: date.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
+  }).format(date);
+}
+
+function memoryMatchesSearch(memory, query) {
+  if (!query) return true;
+  return [
+    memory.type,
+    memory.content,
+    ...(Array.isArray(memory.facets) ? memory.facets : []),
+    memorySourceLabel(memory),
+  ]
+    .join(" ")
+    .toLocaleLowerCase()
+    .includes(query);
+}
+
+function MemoryLedger({
+  memories,
+  loading,
+  focusId,
+  onRefresh,
+  onCreate,
+  onConfirm,
+  onUpdate,
+  onDelete,
+}) {
+  const [draft, setDraft] = useState("");
+  const [type, setType] = useState("fact");
+  const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState("");
+  const [expandedId, setExpandedId] = useState(focusId ?? null);
+  const query = search.trim().toLocaleLowerCase();
+  const visibleMemories = memories.filter((memory) => memoryMatchesSearch(memory, query));
+  const reviewItems = visibleMemories.filter((memory) =>
+    ["candidate", "conflict", "stale"].includes(memory.status),
+  );
+  const confirmed = visibleMemories.filter((memory) => memory.status === "active");
+  const superseded = visibleMemories.filter((memory) => memory.status === "superseded");
+  const memoriesById = new Map(memories.map((memory) => [memory.id, memory]));
+
+  useEffect(() => {
+    if (focusId) setExpandedId(focusId);
+  }, [focusId]);
+
+  useEffect(() => {
+    if (!expandedId && reviewItems.length) setExpandedId(reviewItems[0].id);
+  }, [expandedId, reviewItems.length]);
+
+  async function submitMemory(event) {
+    event.preventDefault();
+    const content = draft.trim();
+    if (!content || saving) return;
+    setSaving(true);
+    const created = await onCreate({ type, content });
+    if (created) setDraft("");
+    setSaving(false);
+  }
+
+  async function editMemory(memory) {
+    const content = window.prompt("Edit what Mind should remember:", memory.content);
+    if (content === null || !content.trim() || content.trim() === memory.content) return;
+    await onUpdate(memory.id, { content: content.trim() });
+  }
+
+  async function setExpiry(memory) {
+    const current = memory.expires_at ? memory.expires_at.slice(0, 10) : "";
+    const value = window.prompt(
+      "Expiry date (YYYY-MM-DD). Leave empty to keep this memory indefinitely:",
+      current,
+    );
+    if (value === null) return;
+    if (!value.trim()) {
+      await onUpdate(memory.id, { expires_at: null });
+      return;
+    }
+    const expiresAt = new Date(`${value.trim()}T23:59:59.999Z`);
+    if (Number.isNaN(expiresAt.getTime())) {
+      window.alert("Use a date such as 2026-12-31.");
+      return;
+    }
+    await onUpdate(memory.id, { expires_at: expiresAt.toISOString() });
+  }
+
+  function memoryRow(memory) {
+    const expired =
+      memory.expires_at && new Date(memory.expires_at).getTime() <= Date.now();
+    const needsReview = ["candidate", "conflict", "stale"].includes(memory.status);
+    const previous = memory.supersedes_id
+      ? memoriesById.get(memory.supersedes_id)
+      : null;
+    const expanded = expandedId === memory.id;
+    const facets = Array.isArray(memory.facets) ? memory.facets : [];
+    const preview = facets.find(
+      (facet) => facet.toLocaleLowerCase() !== memory.content.toLocaleLowerCase(),
+    );
+    return h(
+      "article",
+      {
+        className: `memory-row status-${memory.status}${needsReview ? " review" : ""}${
+          !memory.enabled || expired ? " muted" : ""
+        }${expanded ? " expanded" : ""}${focusId === memory.id ? " focused" : ""}`,
+        id: `memory-${memory.id}`,
+        key: memory.id,
+        tabIndex: focusId === memory.id ? -1 : null,
+      },
+      h(
+        "div",
+        { className: "memory-row-summary" },
+        h(
+          "button",
+          {
+            type: "button",
+            className: "memory-row-toggle",
+            onClick: () => setExpandedId(expanded ? null : memory.id),
+            "aria-expanded": expanded,
+          },
+          h(
+            "span",
+            {
+              className: `memory-status-icon${needsReview ? " attention" : ""}`,
+              "aria-hidden": "true",
+            },
+            h(Icon, {
+              name: needsReview
+                ? memory.status === "conflict"
+                  ? "warning-circle"
+                  : "info"
+                : memory.pinned
+                  ? "push-pin"
+                  : "check-circle",
+              weight: memory.pinned ? "fill" : "regular",
+            }),
+          ),
+          h("span", { className: `memory-type type-${memory.type}` }, memoryTypeLabel(memory.type)),
+          h(
+            "span",
+            { className: "memory-row-copy" },
+            h("strong", null, memory.content),
+            preview ? h("span", null, preview) : null,
+          ),
+          h(
+            "span",
+            { className: "memory-row-source", title: memorySourceTitle(memory) },
+            h("span", null, memorySourceLabel(memory)),
+            h("span", null, memoryUpdatedLabel(memory) ? `Updated ${memoryUpdatedLabel(memory)}` : ""),
+          ),
+          needsReview
+            ? h("span", { className: `memory-state status-${memory.status}` }, memoryReviewLabel(memory))
+            : memory.status === "superseded"
+              ? h("span", { className: "memory-state status-superseded" }, "History")
+              : h("span", { className: "memory-state enabled" }, memory.enabled ? "Enabled" : "Off"),
+          h(Icon, { name: "caret-down", className: "memory-row-caret" }),
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            className: "memory-more",
+            onClick: () => setExpandedId(expanded ? null : memory.id),
+            "aria-label": expanded ? "Collapse memory details" : "Open memory actions",
+          },
+          h(Icon, { name: "dots-three", weight: "bold" }),
+        ),
+      ),
+      expanded
+        ? h(
+            "div",
+            { className: "memory-row-detail" },
+            h(
+              "dl",
+              { className: "memory-detail-meta" },
+              h("div", null, h("dt", null, "Confidence"), h("dd", null, `${Math.round((memory.confidence ?? 1) * 100)}%`)),
+              h(
+                "div",
+                null,
+                h("dt", null, "Expires"),
+                h(
+                  "dd",
+                  null,
+                  memory.expires_at
+                    ? expired
+                      ? "Expired"
+                      : memory.expires_at.slice(0, 10)
+                    : "No expiry",
+                ),
+              ),
+              h("div", null, h("dt", null, "Revision"), h("dd", null, memory.revision ?? 1)),
+              h(
+                "div",
+                null,
+                h("dt", null, "Source"),
+                h("dd", { title: memorySourceTitle(memory) }, memorySourceLabel(memory)),
+              ),
+            ),
+            facets.length
+              ? h(
+                  "div",
+                  { className: "memory-facets" },
+                  h("span", null, "Included details"),
+                  h(
+                    "ul",
+                    null,
+                    facets.map((facet, index) => h("li", { key: `${memory.id}-facet-${index}` }, facet)),
+                  ),
+                )
+              : null,
+            previous
+              ? h(
+                  "div",
+                  { className: "memory-previous" },
+                  h("span", null, memory.status === "conflict" ? "Conflicts with" : "Previous version"),
+                  h("p", null, previous.content),
+                )
+              : null,
+            h(
+              "div",
+              { className: "memory-actions" },
+              needsReview
+                ? h(
+                    "button",
+                    { type: "button", className: "primary", onClick: () => onConfirm(memory.id) },
+                    h(Icon, { name: "check" }),
+                    memoryConfirmLabel(memory),
+                  )
+                : memory.status === "active"
+                  ? h(
+                      "button",
+                      {
+                        type: "button",
+                        onClick: () => onUpdate(memory.id, { enabled: !memory.enabled }),
+                      },
+                      h(Icon, { name: memory.enabled ? "pause" : "play" }),
+                      memory.enabled ? "Disable" : "Enable",
+                    )
+                  : null,
+              memory.status !== "superseded"
+                ? h(
+                    "button",
+                    {
+                      type: "button",
+                      onClick: () => onUpdate(memory.id, { pinned: !memory.pinned }),
+                    },
+                    h(Icon, { name: "push-pin" }),
+                    memory.pinned ? "Unpin" : "Pin",
+                  )
+                : null,
+              memory.status !== "superseded"
+                ? h(
+                    "button",
+                    { type: "button", onClick: () => editMemory(memory) },
+                    h(Icon, { name: "pencil-simple" }),
+                    "Edit",
+                  )
+                : null,
+              memory.status !== "superseded"
+                ? h(
+                    "button",
+                    { type: "button", onClick: () => setExpiry(memory) },
+                    h(Icon, { name: "calendar-blank" }),
+                    "Expiry",
+                  )
+                : null,
+              h(
+                "button",
+                { type: "button", className: "danger", onClick: () => onDelete(memory) },
+                h(Icon, { name: "trash" }),
+                "Delete",
+              ),
+            ),
+          )
+        : null,
+    );
+  }
+
+  return h(
+    "section",
+    { className: "memory-ledger" },
+    h(
+      "div",
+      { className: "memory-toolbar" },
+      h(
+        "div",
+        { className: "memory-title" },
+        h("h1", null, "Memory"),
+        h(
+          "p",
+          null,
+          "Manage what Mind remembers and uses in future conversations.",
+        ),
+      ),
+      h(
+        "div",
+        { className: "memory-toolbar-actions" },
+        h(
+          "label",
+          { className: "memory-search" },
+          h(Icon, { name: "magnifying-glass" }),
+          h("input", {
+            type: "search",
+            value: search,
+            onChange: (event) => setSearch(event.target.value),
+            placeholder: "Search memories",
+            "aria-label": "Search memories",
+          }),
+        ),
+        h(
+          "button",
+          {
+            className: "memory-refresh",
+            type: "button",
+            onClick: onRefresh,
+            disabled: loading,
+            "aria-label": loading ? "Refreshing memories" : "Refresh memories",
+            title: loading ? "Refreshing…" : "Refresh",
+          },
+          h(Icon, { name: "arrow-clockwise" }),
+        ),
+      ),
+    ),
+    h(
+      "form",
+      { className: "memory-create", onSubmit: submitMemory },
+      h(Icon, { name: "plus", className: "memory-create-icon" }),
+      h("select", {
+        value: type,
+        onChange: (event) => setType(event.target.value),
+        "aria-label": "Memory type",
+        children: ["goal", "preference", "project", "fact", "decision"].map((value) =>
+          h("option", { value, key: value }, value),
+        ),
+      }),
+      h("input", {
+        value: draft,
+        onChange: (event) => setDraft(event.target.value),
+        placeholder: "Add something useful for future conversations…",
+        maxLength: 1000,
+        "aria-label": "New memory",
+      }),
+      h(
+        "button",
+        { type: "submit", disabled: saving || !draft.trim() },
+        saving ? "Saving…" : "Add",
+      ),
+      h(
+        "small",
+        null,
+        "Sensitive credentials are rejected and never saved.",
+      ),
+    ),
+    reviewItems.length
+      ? h(
+          "section",
+          { className: "memory-section" },
+          h(
+            "div",
+            { className: "memory-section-heading attention" },
+            h("h2", null, "Needs attention"),
+            h("span", null, reviewItems.length),
+          ),
+          h("div", { className: "memory-list" }, reviewItems.map(memoryRow)),
+        )
+      : null,
+    h(
+      "section",
+      { className: "memory-section" },
+      h(
+        "div",
+        { className: "memory-section-heading" },
+        h("h2", null, "Saved"),
+        h("span", null, confirmed.length),
+      ),
+      confirmed.length
+        ? h("div", { className: "memory-list" }, confirmed.map(memoryRow))
+        : !query
+          ? h(
+            "div",
+            { className: "memory-empty" },
+            h(Icon, { name: "diamond" }),
+            h("p", null, loading ? "Loading your Memory Ledger…" : "No confirmed memories yet."),
+            )
+          : null,
+    ),
+    !reviewItems.length && !confirmed.length && query
+      ? h(
+          "div",
+          { className: "memory-empty memory-search-empty" },
+          h(Icon, { name: "magnifying-glass" }),
+          h("p", null, `No memories match “${search.trim()}”.`),
+        )
+      : null,
+    superseded.length
+      ? h(
+          "details",
+          { className: "memory-history" },
+          h(
+            "summary",
+            null,
+            h("span", null, "History"),
+            h("small", null, `${superseded.length} replaced memories`),
+            h(Icon, { name: "caret-down" }),
+          ),
+          h("div", { className: "memory-list" }, superseded.map(memoryRow)),
+        )
+      : null,
+  );
+}
+
+function MemoryReviewNotice({ notice, onReview, onDismiss }) {
+  const primary = notice.candidates[0] ?? null;
+  const isConflict = primary?.status === "conflict";
+  const isUpdate = primary?.review_reason === "update";
+  const title = isConflict
+    ? "Memory conflict needs review"
+    : isUpdate
+      ? "Memory update needs review"
+      : notice.count === 1
+        ? "New memory needs review"
+        : `${notice.count} memories need review`;
+  const detail = isConflict
+    ? "Choose which version Mind should use in future conversations."
+    : isUpdate
+      ? "Review the suggested change before Mind replaces the previous version."
+      : "Review the suggestion before Mind uses it in future conversations.";
+
+  return h(
+    "section",
+    {
+      className: `memory-review-notice${isConflict ? " conflict" : ""}`,
+      role: "status",
+      "aria-live": "polite",
+    },
+    h(
+      "span",
+      { className: "memory-review-notice-icon", "aria-hidden": "true" },
+      h(Icon, { name: isConflict ? "warning" : "brain" }),
+    ),
+    h(
+      "div",
+      { className: "memory-review-notice-copy" },
+      h("strong", null, title),
+      h("p", null, detail),
+    ),
+    h(
+      "div",
+      { className: "memory-review-notice-actions" },
+      h(
+        "button",
+        { className: "primary", type: "button", onClick: onReview },
+        notice.count === 1 ? "Review memory" : `Review ${notice.count}`,
+      ),
+      h(
+        "button",
+        {
+          className: "dismiss",
+          type: "button",
+          onClick: onDismiss,
+          "aria-label": "Review memory later",
+          title: "Review later",
+        },
+        h(Icon, { name: "x" }),
+      ),
+    ),
+  );
+}
+
 function App({ authSession }) {
   const [apiState, setApiState] = useState("checking");
+  const [activeView, setActiveView] = useState("chat");
   const [mode, setMode] = useState("chat");
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
@@ -1018,6 +1562,10 @@ function App({ authSession }) {
   const [toast, setToast] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [memories, setMemories] = useState([]);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryReviewNotice, setMemoryReviewNotice] = useState(null);
+  const [memoryFocusId, setMemoryFocusId] = useState(null);
   const [providerInfo, setProviderInfo] = useState({
     name: "fake",
     billable: false,
@@ -1029,6 +1577,9 @@ function App({ authSession }) {
   const activeResearchJobRef = useRef(null);
   const activeAssistantRef = useRef(null);
   const endRef = useRef(null);
+  const memoryReviewCount = memories.filter((memory) =>
+    ["candidate", "conflict", "stale"].includes(memory.status),
+  ).length;
 
   async function authorizationHeaders(extra = {}) {
     const token = await authSession.getToken();
@@ -1063,8 +1614,27 @@ function App({ authSession }) {
     }
   }
 
+  async function loadMemories() {
+    setMemoryLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/memories`, {
+        headers: await authorizationHeaders(),
+      });
+      if (!response.ok) throw new Error("Memory Ledger unavailable");
+      const payload = await response.json();
+      setMemories(payload.memories ?? []);
+      setApiState("online");
+    } catch {
+      setApiState("offline");
+      setToast("The Memory Ledger could not be loaded.");
+    } finally {
+      setMemoryLoading(false);
+    }
+  }
+
   useEffect(() => {
-    loadConversations();
+    void loadConversations();
+    void loadMemories();
   }, []);
 
   useEffect(() => {
@@ -1077,6 +1647,19 @@ function App({ authSession }) {
     return () => clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    if (activeView !== "memory" || memoryLoading || !memoryFocusId) {
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      const target = document.getElementById(`memory-${memoryFocusId}`);
+      if (!target) return;
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.focus({ preventScroll: true });
+    }, 40);
+    return () => clearTimeout(timer);
+  }, [activeView, memories, memoryFocusId, memoryLoading]);
+
   function resetConversation() {
     abortRef.current?.abort();
     activeResearchJobRef.current = null;
@@ -1086,6 +1669,7 @@ function App({ authSession }) {
     setMessages([]);
     setInput("");
     setAttachments([]);
+    setActiveView("chat");
     setSidebarOpen(false);
   }
 
@@ -1095,6 +1679,7 @@ function App({ authSession }) {
     activeAssistantRef.current = null;
     setIsStreaming(false);
     setApiState("checking");
+    setActiveView("chat");
     try {
       const response = await fetch(
         `${API_BASE}/api/conversations/${conversation.id}`,
@@ -1241,6 +1826,89 @@ function App({ authSession }) {
     }
   }
 
+  async function createMemory(memory) {
+    try {
+      const response = await fetch(`${API_BASE}/api/memories`, {
+        method: "POST",
+        headers: await authorizationHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(memory),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(payload?.error?.message || "Memory could not be saved.");
+      setMemories((current) => [payload, ...current]);
+      setToast("Memory added and enabled.");
+      return true;
+    } catch (error) {
+      setToast(error.message || "Memory could not be saved.");
+      return false;
+    }
+  }
+
+  async function confirmMemory(memoryId) {
+    const memory = memories.find((item) => item.id === memoryId);
+    if (
+      memory?.sensitivity === "sensitive" &&
+      !window.confirm(
+        "This memory may contain sensitive personal information. Confirm that Mind may use it in future model requests?",
+      )
+    ) {
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE}/api/memories/${memoryId}/confirm`, {
+        method: "POST",
+        headers: await authorizationHeaders(),
+      });
+      if (!response.ok) throw new Error("Memory confirmation failed.");
+      await response.json();
+      await loadMemories();
+      setMemoryFocusId(null);
+      setToast(
+        memory?.status === "conflict"
+          ? "Selected version enabled; the previous version was superseded."
+          : memory?.review_reason === "update"
+            ? "Memory update applied; the previous version was superseded."
+            : "Memory confirmed and enabled.",
+      );
+    } catch {
+      setToast("The memory could not be confirmed.");
+    }
+  }
+
+  async function updateMemory(memoryId, updates) {
+    try {
+      const response = await fetch(`${API_BASE}/api/memories/${memoryId}`, {
+        method: "PATCH",
+        headers: await authorizationHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(updates),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(payload?.error?.message || "Memory update failed.");
+      setMemories((current) =>
+        current.map((item) => (item.id === memoryId ? payload : item)),
+      );
+      setToast("Memory updated.");
+    } catch (error) {
+      setToast(error.message || "The memory could not be updated.");
+    }
+  }
+
+  async function deleteMemory(memory) {
+    if (!window.confirm("Permanently delete this memory?")) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/memories/${memory.id}`, {
+        method: "DELETE",
+        headers: await authorizationHeaders(),
+      });
+      if (response.status !== 204) throw new Error("Memory deletion failed.");
+      setMemories((current) => current.filter((item) => item.id !== memory.id));
+      if (memoryFocusId === memory.id) setMemoryFocusId(null);
+      setToast("Memory deleted.");
+    } catch {
+      setToast("The memory could not be deleted.");
+    }
+  }
+
   function updateAssistantMessage(assistantId, update) {
     setMessages((current) =>
       current.map((message) =>
@@ -1344,6 +2012,22 @@ function App({ authSession }) {
             }
           : message.research,
       }));
+      if ((event.memory_candidate_count ?? 0) > 0) {
+        const candidates = Array.isArray(event.memory_candidates)
+          ? event.memory_candidates
+          : [];
+        setMemoryReviewNotice({
+          candidates,
+          count: event.memory_candidate_count,
+        });
+        void loadMemories();
+      } else if ((event.memory_saved_count ?? 0) > 0) {
+        setToast(
+          `${event.memory_saved_count} explicit memory update${
+            event.memory_saved_count === 1 ? " was" : "s were"
+          } saved.`,
+        );
+      }
     }
     if (event.type === "error") {
       updateAssistantMessage(assistantId, (message) => ({
@@ -1532,6 +2216,36 @@ function App({ authSession }) {
     setSidebarCollapsed(false);
   }
 
+  async function openMemoryReview() {
+    const targetId = memoryReviewNotice?.candidates?.[0]?.id ?? null;
+    abortRef.current?.abort();
+    setIsStreaming(false);
+    setMemoryFocusId(targetId);
+    setMemoryReviewNotice(null);
+    setActiveView("memory");
+    setSidebarOpen(false);
+    await loadMemories();
+  }
+
+  function navigate(item) {
+    setSidebarOpen(false);
+    if (item.view === "heartbeats") {
+      setToast("Heartbeats arrive in the next phase.");
+      return;
+    }
+    if (item.view === "memory") {
+      abortRef.current?.abort();
+      setIsStreaming(false);
+      setMemoryFocusId(null);
+      setMemoryReviewNotice(null);
+      setActiveView("memory");
+      void loadMemories();
+      return;
+    }
+    setActiveView("chat");
+    if (item.mode) setMode(item.mode);
+  }
+
   return h(
     "div",
     {
@@ -1548,6 +2262,8 @@ function App({ authSession }) {
         conversations,
         activeConversationId: conversationId,
         currentUser: authSession.user,
+        activeView,
+        mode,
         onCollapse: collapseSidebar,
         onNewChat: resetConversation,
         onOpenConversation: openConversation,
@@ -1556,6 +2272,8 @@ function App({ authSession }) {
           authService.mode === "firebase" ? deleteAccount : undefined,
         onSignOut:
           authService.mode === "firebase" ? () => authSession.logout() : undefined,
+        onNavigate: navigate,
+        memoryReviewCount,
       }),
     ),
     h(
@@ -1563,7 +2281,8 @@ function App({ authSession }) {
       { className: "main-panel" },
       h(Header, {
         apiState,
-        conversationTitle,
+        conversationTitle: activeView === "memory" ? "Memory" : conversationTitle,
+        view: activeView,
         mode,
         providerInfo,
         sidebarCollapsed,
@@ -1575,7 +2294,18 @@ function App({ authSession }) {
             }`,
           ),
       }),
-      h(
+      activeView === "memory"
+          ? h(MemoryLedger, {
+            memories,
+            loading: memoryLoading,
+            focusId: memoryFocusId,
+            onRefresh: loadMemories,
+            onCreate: createMemory,
+            onConfirm: confirmMemory,
+            onUpdate: updateMemory,
+            onDelete: deleteMemory,
+          })
+        : h(
         "div",
         { className: `workspace${messages.length ? " has-messages" : ""}` },
         messages.length
@@ -1598,6 +2328,13 @@ function App({ authSession }) {
             ),
       ),
     ),
+    memoryReviewNotice
+      ? h(MemoryReviewNotice, {
+          notice: memoryReviewNotice,
+          onReview: openMemoryReview,
+          onDismiss: () => setMemoryReviewNotice(null),
+        })
+      : null,
     toast ? h("div", { className: "toast", role: "status" }, toast) : null,
   );
 }

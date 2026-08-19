@@ -25,6 +25,9 @@ from backend.config import Settings
 from backend.conversation_context import select_recent_history
 from backend.deepseek_provider import DeepSeekProvider
 from backend.fake_agent import FakeAgentProvider
+from backend.memory_retrieval import LocalMemoryRetriever
+from backend.memory_service import MemoryService
+from backend.memory_store import JsonMemoryRepository
 from backend.model_provider import ModelProviderError
 from backend.models import (
     AgentMode,
@@ -33,6 +36,9 @@ from backend.models import (
     Conversation,
     LocalPrincipal,
     Memory,
+    MemoryCreateRequest,
+    MemoryStatus,
+    MemoryType,
     Message,
     MessageRole,
     ModelMessage,
@@ -307,8 +313,9 @@ class FailingModelProvider:
         _mode: AgentMode,
         *,
         history: Sequence[ModelMessage] = (),
+        memory_context: str = "",
     ) -> Iterator[str]:
-        del history
+        del history, memory_context
         raise ModelProviderError(
             "provider_rate_limited",
             "DeepSeek is receiving too many requests. Please retry shortly.",
@@ -322,6 +329,7 @@ class RecordingModelProvider:
 
     def __init__(self) -> None:
         self.history_calls: list[list[ModelMessage]] = []
+        self.memory_context_calls: list[str] = []
 
     def stream_reply(
         self,
@@ -329,8 +337,10 @@ class RecordingModelProvider:
         _mode: AgentMode,
         *,
         history: Sequence[ModelMessage] = (),
+        memory_context: str = "",
     ) -> Iterator[str]:
         self.history_calls.append(list(history))
+        self.memory_context_calls.append(memory_context)
         yield f"Reply to {message}"
 
 
@@ -356,8 +366,14 @@ class MindFastAPIContractTest(unittest.TestCase):
         research_data_path = (
             Path(self.temporary_directory.name) / "research-jobs.json"
         )
+        memory_data_path = Path(self.temporary_directory.name) / "memories.json"
         self.repository = JsonConversationRepository(data_path)
         self.research_repository = JsonResearchRepository(research_data_path)
+        self.memory_repository = JsonMemoryRepository(memory_data_path)
+        self.memory_service = MemoryService(
+            repository=self.memory_repository,
+            retriever=LocalMemoryRetriever(self.memory_repository),
+        )
         self.provider = FakeAgentProvider(delay_seconds=0)
         self.research_provider = MockResearchProvider()
         self.settings = Settings(
@@ -365,6 +381,7 @@ class MindFastAPIContractTest(unittest.TestCase):
             local_token=TEST_TOKEN,
             data_path=data_path,
             research_data_path=research_data_path,
+            memory_data_path=memory_data_path,
             research_poll_interval_seconds=0.001,
             quiet=True,
         )
@@ -375,6 +392,8 @@ class MindFastAPIContractTest(unittest.TestCase):
                 provider=self.provider,
                 research_repository=self.research_repository,
                 research_provider=self.research_provider,
+                memory_repository=self.memory_repository,
+                memory_service=self.memory_service,
             )
         )
         self.addCleanup(self.client.close)
@@ -491,6 +510,155 @@ class MindFastAPIContractTest(unittest.TestCase):
             ["user", "assistant"],
         )
 
+    def test_memory_ledger_lifecycle_is_tenant_scoped_and_user_controlled(
+        self,
+    ) -> None:
+        created = self.client.post(
+            "/api/memories",
+            headers=self.auth_headers,
+            json={
+                "type": "preference",
+                "content": "I prefer concise answers with clear next steps.",
+                "pinned": True,
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        memory = created.json()
+        self.assertEqual(memory["status"], "active")
+        self.assertTrue(memory["enabled"])
+        self.assertTrue(memory["pinned"])
+
+        listed = self.client.get("/api/memories", headers=self.auth_headers)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual([item["id"] for item in listed.json()["memories"]], [memory["id"]])
+
+        updated = self.client.patch(
+            f"/api/memories/{memory['id']}",
+            headers=self.auth_headers,
+            json={"enabled": False, "pinned": False},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertFalse(updated.json()["enabled"])
+        self.assertFalse(updated.json()["pinned"])
+
+        deleted = self.client.delete(
+            f"/api/memories/{memory['id']}",
+            headers=self.auth_headers,
+        )
+        self.assertEqual(deleted.status_code, 204)
+        self.assertEqual(
+            self.client.get("/api/memories", headers=self.auth_headers).json(),
+            {"memories": []},
+        )
+
+    def test_chat_creates_disabled_candidate_and_confirmed_memory_is_retrieved(
+        self,
+    ) -> None:
+        first = self.client.post(
+            "/api/chat",
+            headers=self.auth_headers,
+            json={"message": "我喜欢简洁的回答。", "mode": "chat"},
+        )
+        first_events = parse_sse(first.text)
+        self.assertEqual(first_events[-1]["memory_candidate_count"], 1)
+        candidate = self.memory_repository.list_memories("local-developer")[0]
+        self.assertEqual(
+            first_events[-1]["memory_candidates"],
+            [
+                {
+                    "id": str(candidate.id),
+                    "type": candidate.type.value,
+                    "status": candidate.status.value,
+                    "review_reason": (
+                        candidate.review_reason.value
+                        if candidate.review_reason is not None
+                        else None
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(candidate.type, MemoryType.PREFERENCE)
+        self.assertEqual(candidate.status, MemoryStatus.CANDIDATE)
+        self.assertFalse(candidate.enabled)
+
+        confirmed = self.client.post(
+            f"/api/memories/{candidate.id}/confirm",
+            headers=self.auth_headers,
+        )
+        self.assertEqual(confirmed.status_code, 200)
+        self.assertEqual(confirmed.json()["status"], "active")
+
+        recording_provider = RecordingModelProvider()
+        recording_client = TestClient(
+            create_app(
+                settings=self.settings,
+                repository=self.repository,
+                provider=recording_provider,
+                research_repository=self.research_repository,
+                research_provider=self.research_provider,
+                memory_repository=self.memory_repository,
+                memory_service=self.memory_service,
+            )
+        )
+        self.addCleanup(recording_client.close)
+        second = recording_client.post(
+            "/api/chat",
+            headers=self.auth_headers,
+            json={"message": "请简洁说明下一步。", "mode": "chat"},
+        )
+        second_events = parse_sse(second.text)
+        self.assertIn("我喜欢简洁的回答", recording_provider.memory_context_calls[-1])
+        self.assertEqual(second_events[-1]["memory_ids"], [str(candidate.id)])
+
+        self.client.patch(
+            f"/api/memories/{candidate.id}",
+            headers=self.auth_headers,
+            json={"enabled": False},
+        )
+        recording_client.post(
+            "/api/chat",
+            headers=self.auth_headers,
+            json={"message": "请简洁说明风险。", "mode": "chat"},
+        )
+        self.assertEqual(recording_provider.memory_context_calls[-1], "")
+
+    def test_memory_filters_credentials_and_marks_sensitive_candidates(self) -> None:
+        rejected = self.client.post(
+            "/api/memories",
+            headers=self.auth_headers,
+            json={
+                "type": "fact",
+                "content": "API key: sk-testcredential1234567890",
+            },
+        )
+        self.assertEqual(rejected.status_code, 422)
+        self.assertEqual(rejected.json()["error"]["code"], "memory_content_rejected")
+
+        response = self.client.post(
+            "/api/chat",
+            headers=self.auth_headers,
+            json={"message": "请记住我的医疗诊断需要定期复查。", "mode": "chat"},
+        )
+        self.assertEqual(parse_sse(response.text)[-1]["memory_candidate_count"], 1)
+        candidate = self.memory_repository.list_memories("local-developer")[0]
+        self.assertEqual(candidate.sensitivity.value, "sensitive")
+        self.assertFalse(candidate.enabled)
+
+    def test_explicit_non_sensitive_memory_is_saved_without_review(self) -> None:
+        response = self.client.post(
+            "/api/chat",
+            headers=self.auth_headers,
+            json={"message": "请记住，我的项目叫 Mind。", "mode": "chat"},
+        )
+
+        done = parse_sse(response.text)[-1]
+        self.assertEqual(done["memory_candidate_count"], 0)
+        self.assertEqual(done["memory_candidates"], [])
+        self.assertEqual(done["memory_saved_count"], 1)
+        memory = self.memory_repository.list_memories("local-developer")[0]
+        self.assertEqual(memory.status, MemoryStatus.ACTIVE)
+        self.assertTrue(memory.enabled)
+
     def test_research_streams_checkpoints_sources_and_a_persisted_report(
         self,
     ) -> None:
@@ -569,6 +737,31 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertEqual(
             str(conversation.messages[-1].research_job_id),
             job_id,
+        )
+
+    def test_research_persists_and_uses_relevant_confirmed_memory(self) -> None:
+        memory = self.memory_service.create_memory(
+            MemoryCreateRequest(
+                type=MemoryType.PROJECT,
+                content="My project uses Firebase authentication.",
+            ),
+            "local-developer",
+        )
+        response = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Research Firebase authentication patterns."},
+        )
+        events = parse_sse(response.text)
+        job = self.research_repository.get_job(
+            str(events[0]["job_id"]),
+            "local-developer",
+        )
+
+        self.assertEqual(job.memory_ids, [memory.id])
+        self.assertIn(
+            "My project uses Firebase authentication",
+            self.research_provider.start_calls[0].prompt,
         )
 
     def test_research_repairs_low_sentence_level_citation_coverage(self) -> None:
@@ -1554,10 +1747,15 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertIn("/api/chat", schema["paths"])
         self.assertIn("/api/research", schema["paths"])
         self.assertIn("/api/research/{job_id}", schema["paths"])
+        self.assertIn("/api/memories", schema["paths"])
+        self.assertIn("/api/memories/{memory_id}", schema["paths"])
+        self.assertIn("/api/memories/{memory_id}/confirm", schema["paths"])
         self.assertIn("/api/account", schema["paths"])
         self.assertIn("ResearchRequest", schema["components"]["schemas"])
         self.assertIn("ResearchJob", schema["components"]["schemas"])
         self.assertIn("ChatRequest", schema["components"]["schemas"])
+        self.assertIn("MemoryCreateRequest", schema["components"]["schemas"])
+        self.assertIn("MemoryUpdateRequest", schema["components"]["schemas"])
         self.assertIn("ErrorResponse", schema["components"]["schemas"])
 
     def test_account_deletion_stops_active_research_and_removes_owned_data(
@@ -1582,6 +1780,10 @@ class MindFastAPIContractTest(unittest.TestCase):
             "resp_account_delete",
             {"id": "resp_account_delete", "status": "in_progress", "output": []},
         )
+        self.memory_service.create_memory(
+            MemoryCreateRequest(content="Remember this before account deletion."),
+            "local-developer",
+        )
 
         response = self.client.delete(
             "/api/account",
@@ -1595,6 +1797,7 @@ class MindFastAPIContractTest(unittest.TestCase):
         )
         self.assertEqual(self.repository.list_conversations("local-developer"), [])
         self.assertEqual(self.research_repository.list_jobs("local-developer"), [])
+        self.assertEqual(self.memory_repository.list_memories("local-developer"), [])
 
     def test_firebase_account_deletion_requires_recent_authentication(self) -> None:
         class OldFirebasePrincipalVerifier:

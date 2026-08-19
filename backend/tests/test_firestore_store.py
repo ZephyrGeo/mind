@@ -7,9 +7,11 @@ from typing import Any
 
 from backend.firestore_store import (
     FirestoreConversationRepository,
+    FirestoreMemoryRepository,
     FirestoreResearchRepository,
 )
-from backend.models import AgentMode, ResearchJob, ResearchStatus
+from backend.memory_store import MemoryNotFoundError
+from backend.models import AgentMode, Memory, MemoryStatus, ResearchJob, ResearchStatus
 from backend.research_store import ResearchJobNotFoundError
 from backend.store import ConversationNotFoundError
 
@@ -54,6 +56,11 @@ class FakeDocument:
             current.update(payload)
         else:
             self.client.documents[self.path] = dict(payload)
+
+    def update(self, payload: dict[str, Any]) -> None:
+        if self.path not in self.client.documents:
+            raise KeyError(self.path)
+        self.client.documents[self.path].update(payload)
 
     def delete(self) -> None:
         self.client.documents.pop(self.path, None)
@@ -179,6 +186,11 @@ class FirestoreRepositoryTest(unittest.TestCase):
             client=self.client,
             transactional=fake_transactional,
         )
+        self.memories = FirestoreMemoryRepository(
+            project_id="demo-mind-local",
+            client=self.client,
+            transactional=fake_transactional,
+        )
 
     def test_conversations_are_ordered_tenant_scoped_and_idempotent(self) -> None:
         conversation_id = self.conversations.append_exchange(
@@ -254,6 +266,64 @@ class FirestoreRepositoryTest(unittest.TestCase):
 
         self.jobs.delete_for_conversation(conversation_id, "owner")
         self.assertEqual(self.jobs.list_jobs("owner"), [])
+
+    def test_memories_are_idempotent_tenant_scoped_and_deletable(self) -> None:
+        memory = Memory(user_id="owner", content="Remember the staging goal.")
+        self.memories.create_memory(memory)
+        self.assertEqual(self.memories.upsert_memory(memory), memory)
+        self.assertEqual(self.memories.list_memories("owner"), [memory])
+        with self.assertRaises(MemoryNotFoundError):
+            self.memories.get_memory(memory.id, "stranger")
+
+        confirmed = memory.model_copy(
+            update={"status": MemoryStatus.ACTIVE, "enabled": True}
+        )
+        self.memories.save_memory(confirmed, "owner")
+        self.assertTrue(self.memories.get_memory(memory.id, "owner").enabled)
+
+        self.memories.delete_for_user("owner")
+        self.assertEqual(self.memories.list_memories("owner"), [])
+
+    def test_memory_vectors_are_private_and_support_bounded_similarity(self) -> None:
+        first = Memory(
+            user_id="owner",
+            content="I prefer concise product updates.",
+            status=MemoryStatus.ACTIVE,
+            enabled=True,
+        )
+        second = Memory(
+            user_id="owner",
+            content="Mind launches on Friday.",
+            status=MemoryStatus.ACTIVE,
+            enabled=True,
+        )
+        self.memories.create_memory(first)
+        self.memories.create_memory(second)
+        self.memories.save_memory_embedding(
+            first.id,
+            "owner",
+            model="test-embedding",
+            vector=[1.0, 0.0],
+        )
+        self.memories.save_memory_embedding(
+            second.id,
+            "owner",
+            model="test-embedding",
+            vector=[0.0, 1.0],
+        )
+
+        self.assertEqual(
+            self.memories.memory_embedding(first.id, "owner"),
+            ("test-embedding", [1.0, 0.0]),
+        )
+        matches = self.memories.find_similar_memories(
+            "owner",
+            [0.9, 0.1],
+            limit=1,
+        )
+        self.assertEqual(matches[0][0].id, first.id)
+        self.assertGreater(matches[0][1], 0.9)
+        self.assertFalse(hasattr(self.memories.get_memory(first.id, "owner"), "embedding"))
 
 
 if __name__ == "__main__":

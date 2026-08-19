@@ -28,6 +28,13 @@ Deep Research uses an independent OpenAI ResearchProvider.
 - OpenAPI documentation at `/docs`, `/redoc`, and `/openapi.json`
 - Atomic, tenant-scoped JSON conversation persistence under `work/`
 - Replaceable Firestore conversation and Research repositories
+- User-controlled intelligent Memory Ledger with structured OpenAI extraction,
+  question and credential rejection, provenance, confidence and sensitivity,
+  explicit confirmation, semantic deduplication, update/conflict review,
+  superseded history, staleness, expiry, pin, edit, disable, and deletion controls
+- OpenAI embeddings plus Firestore vector search select relevant confirmed
+  memories for later Chat and Research; lexical fallback keeps retrieval available
+  while an index builds or the embedding service is temporarily unavailable
 - Firebase Emulator and tenant-isolation Security Rules test workflow
 - Terraform staging foundation and CI quality gates
 - Python 3.12 container image running as a non-root user
@@ -51,8 +58,8 @@ Then open <http://127.0.0.1:3000/>.
 
 The local API runs at <http://127.0.0.1:8000/>. Conversation data is written to
 `work/local-data/conversations.json`; research checkpoints are written to
-`work/local-data/research-jobs.json`. Both are intentionally ignored by source
-control.
+`work/local-data/research-jobs.json`; Memory Ledger entries are written to
+`work/local-data/memories.json`. All are intentionally ignored by source control.
 
 The current milestone uses safe local defaults. For persistent project-local
 DeepSeek configuration, copy the ignored example once:
@@ -82,6 +89,19 @@ MIND_RESEARCH_PROVIDER=openai
 MIND_RESEARCH_MODEL=gpt-5.6-terra
 ```
 
+To test the production Memory path locally with the same OpenAI key, also add:
+
+```dotenv
+MIND_MEMORY_PROVIDER=openai
+MIND_MEMORY_MODEL=gpt-5.4-mini
+MIND_EMBEDDING_PROVIDER=openai
+MIND_EMBEDDING_MODEL=text-embedding-3-small
+```
+
+Without those Memory overrides, local development intentionally uses the
+zero-cost deterministic extractor and embedding fallback. Staging and
+production require the OpenAI implementations.
+
 Research runs several bounded background OpenAI Responses. Mind plans and
 coordinates the stages; only evidence-collection workers enable built-in web
 search. The default budget is two rounds, at most six initial subquestions, 24
@@ -110,8 +130,9 @@ and the provider/repository boundaries.
 npm run test:all
 ```
 
-The required test suite is deterministic and uses simulated DeepSeek SSE plus a
-mock OpenAI ResearchProvider; it never calls a model or search service.
+The required test suite is deterministic and uses simulated DeepSeek SSE plus
+mock OpenAI Research, Memory, and Embedding responses; it never calls a model or
+search service.
 
 For the Firebase Emulator tenant-isolation test, run:
 
@@ -129,9 +150,10 @@ After Firebase and gcloud login, the early staging slice is deployed with:
 npm run deploy:staging
 ```
 
-The script keeps model keys server-side in Secret Manager, deploys the API with
-scale-to-zero, publishes Firestore rules and Firebase Hosting, and verifies the
-Cloud Run health response before reporting the URLs. See
+The script keeps model keys server-side in Secret Manager, ensures the Firestore
+Memory vector index, deploys the API with scale-to-zero, publishes Firestore
+rules and Firebase Hosting, and verifies the Cloud Run health response before
+reporting the URLs. See
 [Staging infrastructure](infra/README.md) for the Terraform equivalent.
 
 ## Run the API container
@@ -149,9 +171,9 @@ Then open <http://127.0.0.1:8000/docs>.
 2. FastAPI, typed kernel boundaries, OpenAPI, and container — complete
 3. DeepSeek streaming provider and multi-turn conversations — complete
 4. Local checkpointed Deep Research MVP — complete
-5. Firebase Authentication and Firestore foundation — in progress
+5. Firebase Authentication and Firestore foundation — complete
 6. File and voice inputs
-7. Memory Ledger, Heartbeats, and Insight Diff
+7. Intelligent Memory Ledger — complete MVP; Heartbeats and Insight Diff follow
 8. Production research workers, Terraform, CI/CD, monitoring, and report
 
 Fake and DeepSeek Chat providers share `ModelProvider`. OpenAI Research uses the

@@ -29,6 +29,11 @@ test("local development loads an optional ignored environment file", async () =>
   assert.match(example, /^MIND_AUTH_PROVIDER=local$/m);
   assert.match(example, /^MIND_PERSISTENCE_PROVIDER=json$/m);
   assert.match(example, /^MIND_FIRESTORE_DATABASE_ID=\(default\)$/m);
+  assert.match(example, /^MIND_MEMORY_PROVIDER=rules$/m);
+  assert.match(example, /^MIND_MEMORY_MODEL=gpt-5\.4-mini$/m);
+  assert.match(example, /^MIND_EMBEDDING_PROVIDER=local$/m);
+  assert.match(example, /^MIND_EMBEDDING_MODEL=text-embedding-3-small$/m);
+  assert.match(example, /^MIND_EMBEDDING_DIMENSIONS=256$/m);
   assert.doesNotMatch(example, /TAVILY_API_KEY|MIND_SEARCH_PROVIDER/);
 });
 
@@ -56,7 +61,18 @@ test("staging grants the API Firebase Auth access and mounts model secrets", asy
     assert.match(source, /identitytoolkit\.googleapis\.com/);
     assert.match(source, /roles\/firebaseauth\.admin/);
     assert.match(source, /MIND_FIREBASE_CHECK_REVOKED/);
+    assert.match(source, /MIND_MEMORY_RETRIEVAL_LIMIT/);
+    assert.match(source, /MIND_MEMORY_MAX_CONTEXT_CHARACTERS/);
+    assert.match(source, /MIND_MEMORY_PROVIDER/);
+    assert.match(source, /MIND_MEMORY_MODEL/);
+    assert.match(source, /MIND_EMBEDDING_PROVIDER/);
+    assert.match(source, /MIND_EMBEDDING_MODEL/);
+    assert.match(source, /MIND_EMBEDDING_DIMENSIONS/);
   }
+  assert.match(deployScript, /ensureMemoryVectorIndex/);
+  assert.match(deployScript, /collection-group["',\s]+memories/);
+  assert.match(terraform, /google_firestore_index" "memory_embedding/);
+  assert.match(terraform, /vector_config/);
   assert.match(deployScript, /OPENAI_API_KEY=.*:latest/);
   assert.match(deployScript, /DEEPSEEK_API_KEY=.*:latest/);
 });

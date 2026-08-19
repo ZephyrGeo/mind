@@ -93,6 +93,24 @@ test(
       (error) => error?.code === "permission-denied",
     );
 
+    const ownerMemory = doc(
+      owner.database,
+      `users/${ownerId}/memories/memory-1`,
+    );
+    await setDoc(ownerMemory, {
+      user_id: ownerId,
+      content: "Owned memory",
+      status: "active",
+      enabled: true,
+    });
+    assert.equal((await getDoc(ownerMemory)).data().content, "Owned memory");
+    await assert.rejects(
+      getDoc(
+        doc(stranger.database, `users/${ownerId}/memories/memory-1`),
+      ),
+      (error) => error?.code === "permission-denied",
+    );
+
     await Promise.all([deleteApp(owner.app), deleteApp(stranger.app)]);
   },
 );

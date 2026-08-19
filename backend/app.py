@@ -34,8 +34,18 @@ from .errors import APIError
 from .fake_agent import FakeAgentProvider
 from .firestore_store import (
     FirestoreConversationRepository,
+    FirestoreMemoryRepository,
     FirestoreResearchRepository,
 )
+from .memory_embedding import HashEmbeddingProvider, OpenAIEmbeddingProvider
+from .memory_provider import OpenAIMemoryProvider, RuleMemoryProvider
+from .memory_retrieval import FirestoreVectorRetriever, LocalMemoryRetriever
+from .memory_service import (
+    MemoryConfirmationRequiredError,
+    MemoryContentRejectedError,
+    MemoryService,
+)
+from .memory_store import JsonMemoryRepository, MemoryNotFoundError
 from .model_provider import ModelProvider, ModelProviderError
 from .models import (
     ChatRequest,
@@ -46,12 +56,17 @@ from .models import (
     ErrorResponse,
     HealthResponse,
     LocalPrincipal,
+    MemoriesResponse,
+    Memory,
+    MemoryCreateRequest,
+    MemoryStatus,
+    MemoryUpdateRequest,
     ResearchJob,
     ResearchRequest,
 )
 from .observability import configure_logging, log_event
 from .openai_research_provider import OpenAIResearchProvider
-from .repositories import ConversationRepository
+from .repositories import ConversationRepository, MemoryRepository
 from .research_provider import ResearchProvider, ResearchProviderError
 from .research_repositories import ResearchRepository
 from .research_service import (
@@ -160,6 +175,55 @@ def create_research_repository(settings: Settings) -> ResearchRepository:
     )
 
 
+def create_memory_repository(settings: Settings) -> MemoryRepository:
+    """Build local JSON or production Firestore Memory persistence."""
+
+    if settings.persistence_provider == "json":
+        return JsonMemoryRepository(settings.memory_data_path)
+    if settings.persistence_provider == "firestore":
+        if settings.firebase_project_id is None:
+            raise ValueError("Firebase project ID is missing.")
+        return FirestoreMemoryRepository(
+            project_id=settings.firebase_project_id,
+            database_id=settings.firestore_database_id,
+        )
+    raise ValueError(
+        f"Unsupported persistence provider: {settings.persistence_provider}"
+    )
+
+
+def create_memory_provider(settings: Settings) -> RuleMemoryProvider | OpenAIMemoryProvider:
+    if settings.memory_provider == "rules":
+        return RuleMemoryProvider()
+    if settings.memory_provider == "openai":
+        return OpenAIMemoryProvider(
+            api_key=settings.openai_api_key,
+            model=settings.memory_model,
+            base_url=settings.openai_base_url,
+            reasoning_effort=settings.memory_reasoning_effort,
+            timeout_seconds=settings.memory_timeout_seconds,
+        )
+    raise ValueError(f"Unsupported Memory provider: {settings.memory_provider}")
+
+
+def create_embedding_provider(
+    settings: Settings,
+) -> HashEmbeddingProvider | OpenAIEmbeddingProvider:
+    if settings.embedding_provider == "local":
+        return HashEmbeddingProvider(dimensions=settings.embedding_dimensions)
+    if settings.embedding_provider == "openai":
+        return OpenAIEmbeddingProvider(
+            api_key=settings.openai_api_key,
+            model=settings.embedding_model,
+            dimensions=settings.embedding_dimensions,
+            base_url=settings.openai_base_url,
+            timeout_seconds=settings.memory_timeout_seconds,
+        )
+    raise ValueError(
+        f"Unsupported Embedding provider: {settings.embedding_provider}"
+    )
+
+
 def create_account_manager(
     settings: Settings,
     principal_verifier: PrincipalVerifier,
@@ -248,6 +312,8 @@ def create_app(
     provider: ModelProvider | None = None,
     research_repository: ResearchRepository | None = None,
     research_provider: ResearchProvider | None = None,
+    memory_repository: MemoryRepository | None = None,
+    memory_service: MemoryService | None = None,
     principal_verifier: PrincipalVerifier | None = None,
     account_manager: AccountManager | None = None,
 ) -> FastAPI:
@@ -261,6 +327,31 @@ def create_app(
     )
     runtime_research_provider = (
         research_provider or create_research_provider(runtime_settings)
+    )
+    runtime_memory_repository = memory_repository or create_memory_repository(
+        runtime_settings
+    )
+    runtime_embedding_provider = create_embedding_provider(runtime_settings)
+    runtime_memory_provider = create_memory_provider(runtime_settings)
+    runtime_memory_retriever = (
+        FirestoreVectorRetriever(
+            runtime_memory_repository,
+            runtime_embedding_provider,
+            semantic_threshold=runtime_settings.memory_semantic_threshold,
+        )
+        if runtime_settings.persistence_provider == "firestore"
+        else LocalMemoryRetriever(
+            runtime_memory_repository,
+            runtime_embedding_provider,
+            semantic_threshold=runtime_settings.memory_semantic_threshold,
+        )
+    )
+    runtime_memory_service = memory_service or MemoryService(
+        repository=runtime_memory_repository,
+        retriever=runtime_memory_retriever,
+        provider=runtime_memory_provider,
+        retrieval_limit=runtime_settings.memory_retrieval_limit,
+        max_context_characters=runtime_settings.memory_max_context_characters,
     )
     runtime_principal_verifier = (
         principal_verifier or create_principal_verifier(runtime_settings)
@@ -281,7 +372,7 @@ def create_app(
             "Mind exposes replaceable Chat ModelProvider and long-running "
             "ResearchProvider boundaries with explicit billing and failure signals."
         ),
-        version="0.6.0",
+        version="0.7.0",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -296,6 +387,10 @@ def create_app(
     application.state.provider = runtime_provider
     application.state.research_repository = runtime_research_repository
     application.state.research_provider = runtime_research_provider
+    application.state.memory_repository = runtime_memory_repository
+    application.state.memory_service = runtime_memory_service
+    application.state.memory_provider = runtime_memory_provider
+    application.state.embedding_provider = runtime_embedding_provider
     application.state.principal_verifier = runtime_principal_verifier
     application.state.account_manager = runtime_account_manager
     application.state.logger = logger
@@ -318,6 +413,7 @@ def create_app(
         ),
         job_timeout_seconds=runtime_settings.research_job_timeout_seconds,
         max_tool_calls_per_task=runtime_settings.research_max_tool_calls,
+        memory_service=runtime_memory_service,
         logger=logger,
     )
     application.state.research_service = research_service
@@ -347,7 +443,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(runtime_settings.allowed_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
             "Accept",
             "Authorization",
@@ -532,6 +628,141 @@ def create_app(
                 message="Conversation does not exist for this user.",
             ) from None
 
+    @application.get(
+        "/api/memories",
+        response_model=MemoriesResponse,
+        responses={401: {"model": ErrorResponse}},
+        tags=["memory"],
+        operation_id="listMemories",
+    )
+    async def list_memories(principal: Principal) -> MemoriesResponse:
+        return MemoriesResponse(
+            memories=runtime_memory_service.list_memories(principal.user_id)
+        )
+
+    @application.post(
+        "/api/memories",
+        response_model=Memory,
+        status_code=201,
+        responses={
+            401: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
+        tags=["memory"],
+        operation_id="createMemory",
+    )
+    async def create_memory(
+        payload: MemoryCreateRequest,
+        principal: Principal,
+    ) -> Memory:
+        try:
+            return runtime_memory_service.create_memory(payload, principal.user_id)
+        except MemoryContentRejectedError as error:
+            raise APIError(
+                status_code=422,
+                code="memory_content_rejected",
+                message=str(error),
+            ) from None
+
+    @application.post(
+        "/api/memories/{memory_id}/confirm",
+        response_model=Memory,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+        },
+        tags=["memory"],
+        operation_id="confirmMemory",
+    )
+    async def confirm_memory(
+        memory_id: uuid.UUID,
+        principal: Principal,
+    ) -> Memory:
+        try:
+            return runtime_memory_service.confirm_memory(
+                memory_id,
+                principal.user_id,
+            )
+        except MemoryNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="memory_not_found",
+                message="Memory does not exist for this user.",
+            ) from None
+        except MemoryConfirmationRequiredError as error:
+            raise APIError(
+                status_code=409,
+                code="memory_confirmation_required",
+                message=str(error),
+            ) from None
+
+    @application.patch(
+        "/api/memories/{memory_id}",
+        response_model=Memory,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
+        tags=["memory"],
+        operation_id="updateMemory",
+    )
+    async def update_memory(
+        memory_id: uuid.UUID,
+        payload: MemoryUpdateRequest,
+        principal: Principal,
+    ) -> Memory:
+        try:
+            return runtime_memory_service.update_memory(
+                memory_id,
+                payload,
+                principal.user_id,
+            )
+        except MemoryNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="memory_not_found",
+                message="Memory does not exist for this user.",
+            ) from None
+        except MemoryConfirmationRequiredError as error:
+            raise APIError(
+                status_code=409,
+                code="memory_confirmation_required",
+                message=str(error),
+            ) from None
+        except MemoryContentRejectedError as error:
+            raise APIError(
+                status_code=422,
+                code="memory_content_rejected",
+                message=str(error),
+            ) from None
+
+    @application.delete(
+        "/api/memories/{memory_id}",
+        status_code=204,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+        },
+        tags=["memory"],
+        operation_id="deleteMemory",
+    )
+    async def delete_memory(
+        memory_id: uuid.UUID,
+        principal: Principal,
+    ) -> Response:
+        try:
+            runtime_memory_service.delete_memory(memory_id, principal.user_id)
+        except MemoryNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="memory_not_found",
+                message="Memory does not exist for this user.",
+            ) from None
+        return Response(status_code=204)
+
     @application.delete(
         "/api/conversations/{conversation_id}",
         status_code=204,
@@ -644,6 +875,7 @@ def create_app(
 
         runtime_repository.delete_for_user(principal.user_id)
         runtime_research_repository.delete_for_user(principal.user_id)
+        runtime_memory_repository.delete_for_user(principal.user_id)
         try:
             runtime_account_manager.delete_user(principal.user_id)
         except Exception as error:
@@ -865,7 +1097,18 @@ def create_app(
 
         def event_stream() -> Iterator[str]:
             reply_parts: list[str] = []
+            memory_ids: list[uuid.UUID] = []
+            memory_context = ""
+            memory_candidate_count = 0
+            memory_saved_count = 0
+            memory_candidates: list[dict[str, str | None]] = []
             try:
+                memory_ids, memory_context = (
+                    runtime_memory_service.context_for_query(
+                        principal.user_id,
+                        payload.message,
+                    )
+                )
                 history = []
                 if payload.conversation_id is not None:
                     conversation = runtime_repository.get_conversation(
@@ -877,13 +1120,15 @@ def create_app(
                         max_characters=max(
                             0,
                             runtime_settings.max_context_characters
-                            - len(payload.message),
+                            - len(payload.message)
+                            - len(memory_context),
                         ),
                     )
                 for delta in runtime_provider.stream_reply(
                     payload.message,
                     payload.mode,
                     history=history,
+                    memory_context=memory_context,
                 ):
                     reply_parts.append(delta)
                     yield _sse_event({"type": "delta", "delta": delta})
@@ -895,6 +1140,46 @@ def create_app(
                     payload.mode,
                     user_id=principal.user_id,
                 )
+                try:
+                    candidates = (
+                        runtime_memory_service.capture_conversation_candidates(
+                            user_id=principal.user_id,
+                            conversation_id=conversation_id,
+                            user_message=payload.message,
+                        )
+                    )
+                    memory_candidate_count = sum(
+                        candidate.status != MemoryStatus.ACTIVE
+                        for candidate in candidates
+                    )
+                    memory_saved_count = sum(
+                        candidate.status == MemoryStatus.ACTIVE
+                        for candidate in candidates
+                    )
+                    memory_candidates = [
+                        {
+                            "id": str(candidate.id),
+                            "type": candidate.type.value,
+                            "status": candidate.status.value,
+                            "review_reason": (
+                                candidate.review_reason.value
+                                if candidate.review_reason is not None
+                                else None
+                            ),
+                        }
+                        for candidate in candidates
+                        if candidate.status != MemoryStatus.ACTIVE
+                    ]
+                except Exception:
+                    logger.exception(
+                        "chat_memory_candidate_capture_failed",
+                        extra={
+                            "event_data": {
+                                "request_id": request_id,
+                                "conversation_id": conversation_id,
+                            }
+                        },
+                    )
                 log_event(
                     logger,
                     "chat_completed",
@@ -907,6 +1192,9 @@ def create_app(
                     history_character_count=sum(
                         len(message.content) for message in history
                     ),
+                    retrieved_memory_count=len(memory_ids),
+                    memory_candidate_count=memory_candidate_count,
+                    memory_saved_count=memory_saved_count,
                     token_usage=(
                         None if runtime_provider.billable_model_calls else 0
                     ),
@@ -919,6 +1207,10 @@ def create_app(
                     {
                         "type": "done",
                         "conversation_id": conversation_id,
+                        "memory_ids": [str(memory_id) for memory_id in memory_ids],
+                        "memory_candidate_count": memory_candidate_count,
+                        "memory_candidates": memory_candidates,
+                        "memory_saved_count": memory_saved_count,
                         "request_id": request_id,
                     }
                 )

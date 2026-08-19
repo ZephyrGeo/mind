@@ -41,11 +41,22 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_FIRESTORE_DATABASE_ID` | `(default)` | Firestore database ID |
 | `MIND_DATA_PATH` | `work/local-data/conversations.json` | Ignored JSON persistence path |
 | `MIND_RESEARCH_DATA_PATH` | `work/local-data/research-jobs.json` | Ignored, atomic research checkpoint path |
+| `MIND_MEMORY_DATA_PATH` | `work/local-data/memories.json` | Ignored, atomic local Memory Ledger path |
 | `MIND_API_HOST` | `127.0.0.1` | API bind host; the container uses `0.0.0.0` |
 | `MIND_API_PORT` | `8000` | API port; the container uses `8080` |
 | `MIND_ALLOWED_ORIGINS` | Both local frontend origins | Comma-separated exact CORS origins |
 | `MIND_MAX_REQUEST_BYTES` | `64000` | Maximum accepted HTTP request body |
 | `MIND_MAX_CONTEXT_CHARACTERS` | `64000` | Total character budget for the new message plus recent complete conversation turns |
+| `MIND_MEMORY_RETRIEVAL_LIMIT` | `5` | Maximum relevant confirmed memories selected for one Chat or Research request |
+| `MIND_MEMORY_MAX_CONTEXT_CHARACTERS` | `4000` | Maximum Memory Ledger context added to one model request |
+| `MIND_MEMORY_PROVIDER` | `rules` | `rules` for zero-cost local development or `openai`; staging/production require `openai` |
+| `MIND_MEMORY_MODEL` | `gpt-5.4-mini` | OpenAI model used for strict durable-memory extraction and reconciliation |
+| `MIND_MEMORY_REASONING_EFFORT` | `low` | Reasoning effort for Memory extraction |
+| `MIND_MEMORY_TIMEOUT_SECONDS` | `45` | Timeout for one Memory extraction or embedding request |
+| `MIND_EMBEDDING_PROVIDER` | `local` | Deterministic local fallback or `openai`; staging/production require `openai` |
+| `MIND_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model for multilingual semantic retrieval |
+| `MIND_EMBEDDING_DIMENSIONS` | `256` | Vector dimensions; must match the Firestore Memory vector index |
+| `MIND_MEMORY_SEMANTIC_THRESHOLD` | `0.68` | Minimum cosine similarity for semantic retrieval before lexical bonuses |
 | `MIND_MODEL_PROVIDER` | `fake` | `fake` or `deepseek`; DeepSeek is an explicit billable opt-in |
 | `DEEPSEEK_API_KEY` | unset | Required only when `MIND_MODEL_PROVIDER=deepseek`; secret environment value |
 | `MIND_DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | HTTPS API origin; credentials in URLs are rejected |
@@ -94,6 +105,21 @@ OPENAI_API_KEY=<your OpenAI API key>
 MIND_RESEARCH_MODEL=gpt-5.6-terra
 ```
 
+For live intelligent Memory extraction and semantic retrieval, add:
+
+```dotenv
+MIND_MEMORY_PROVIDER=openai
+MIND_MEMORY_MODEL=gpt-5.4-mini
+MIND_EMBEDDING_PROVIDER=openai
+MIND_EMBEDDING_MODEL=text-embedding-3-small
+MIND_EMBEDDING_DIMENSIONS=256
+```
+
+The same server-side `OPENAI_API_KEY` is used, but the Memory and Research
+provider boundaries remain independent. Existing memories are embedded lazily
+in bounded batches on first retrieval; new and edited memories are embedded
+when saved.
+
 Research does not use the Chat DeepSeek key and has no alternate production
 search provider. In development, the API can still start without an OpenAI key
 so Chat remains usable, but health reports Research as unavailable and a
@@ -120,7 +146,8 @@ npm run dev:firebase
 
 Do not place real keys in `.env.example`, source control, frontend code, or
 support messages. `Settings` fails at startup when DeepSeek Chat is selected
-without its key; staging and production also require the OpenAI Research key.
+without its key; staging and production also require OpenAI Memory extraction,
+OpenAI embeddings, and the OpenAI Research key.
 `/api/health` separately reports Chat and Research billing/readiness. Only
 `npm run dev` loads `.env.local`; tests deliberately ignore it so required CI
 and local validation cannot accidentally make billable calls.
@@ -131,7 +158,7 @@ Firebase mode it obtains and refreshes the signed-in user's ID token.
 ## Test and CI guarantees
 
 Required CI runs `npm run test:all` with the Fake Agent, simulated DeepSeek HTTP
-streams, and a mock OpenAI ResearchProvider. Tests must not require model
+streams, and mock OpenAI Research, Memory, and Embedding responses. Tests must not require model
 credentials, GCP credentials, OAuth tokens, network access, or a billable model.
 Any live-model evaluation must be a separate, explicitly budgeted job and must
 never replace the required zero-cost suite.
@@ -150,6 +177,11 @@ Runtime secrets belong in Google Secret Manager and must be injected into Cloud
 Run by secret reference. Public frontend configuration may contain Firebase web
 application identifiers, but no service-account key, OAuth client secret, model
 credential, or local conversation data may be committed.
+
+Staging deployment also ensures a 256-dimension flat vector index for the
+`memories.embedding` field. The API uses a bounded vector/lexical fallback while
+the index builds, then automatically uses Firestore nearest-neighbor queries
+when it becomes ready.
 
 Git ignores `.env` and every `.env.*` file except the redacted
 `.env.example`. Terraform state, generated credentials, and provider cache files

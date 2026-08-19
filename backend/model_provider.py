@@ -20,6 +20,7 @@ class ModelProvider(Protocol):
         mode: AgentMode,
         *,
         history: Sequence[ModelMessage] = (),
+        memory_context: str = "",
     ) -> Iterator[str]:
         """Yield ordered text deltas for a single assistant response."""
 

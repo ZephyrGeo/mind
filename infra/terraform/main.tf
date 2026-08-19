@@ -106,6 +106,31 @@ resource "google_firestore_database" "default" {
   depends_on = [google_project_service.required]
 }
 
+resource "google_firestore_index" "memory_embedding" {
+  project     = var.project_id
+  database    = "(default)"
+  collection  = "memories"
+  query_scope = "COLLECTION"
+
+  fields {
+    field_path = "__name__"
+    order      = "ASCENDING"
+  }
+
+  fields {
+    field_path = "embedding"
+    vector_config {
+      dimension = 256
+      flat {}
+    }
+  }
+
+  deletion_policy = "ABANDON"
+  skip_wait        = true
+
+  depends_on = [google_project_service.required]
+}
+
 resource "google_cloud_run_v2_service" "api" {
   count = var.deploy_cloud_run ? 1 : 0
 
@@ -170,6 +195,48 @@ resource "google_cloud_run_v2_service" "api" {
       env {
         name  = "MIND_FIRESTORE_DATABASE_ID"
         value = "(default)"
+      }
+
+      env {
+        name  = "MIND_MEMORY_RETRIEVAL_LIMIT"
+        value = "5"
+      }
+
+      env {
+        name  = "MIND_MEMORY_MAX_CONTEXT_CHARACTERS"
+        value = "4000"
+      }
+      env {
+        name  = "MIND_MEMORY_PROVIDER"
+        value = "openai"
+      }
+      env {
+        name  = "MIND_MEMORY_MODEL"
+        value = "gpt-5.4-mini"
+      }
+      env {
+        name  = "MIND_MEMORY_REASONING_EFFORT"
+        value = "low"
+      }
+      env {
+        name  = "MIND_MEMORY_TIMEOUT_SECONDS"
+        value = "45"
+      }
+      env {
+        name  = "MIND_EMBEDDING_PROVIDER"
+        value = "openai"
+      }
+      env {
+        name  = "MIND_EMBEDDING_MODEL"
+        value = "text-embedding-3-small"
+      }
+      env {
+        name  = "MIND_EMBEDDING_DIMENSIONS"
+        value = "256"
+      }
+      env {
+        name  = "MIND_MEMORY_SEMANTIC_THRESHOLD"
+        value = "0.68"
       }
       env {
         name  = "MIND_ALLOWED_ORIGINS"

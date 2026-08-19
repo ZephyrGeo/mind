@@ -13,6 +13,7 @@ DEFAULT_DATA_PATH = PROJECT_ROOT / "work" / "local-data" / "conversations.json"
 DEFAULT_RESEARCH_DATA_PATH = (
     PROJECT_ROOT / "work" / "local-data" / "research-jobs.json"
 )
+DEFAULT_MEMORY_DATA_PATH = PROJECT_ROOT / "work" / "local-data" / "memories.json"
 DEFAULT_LOCAL_TOKEN = "local-demo-token"
 DEFAULT_ALLOWED_ORIGINS = (
     "http://127.0.0.1:3000",
@@ -22,6 +23,8 @@ DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_RESEARCH_MODEL = "gpt-5.6-terra"
+DEFAULT_MEMORY_MODEL = "gpt-5.4-mini"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 def _csv(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -49,11 +52,22 @@ class Settings:
     firestore_database_id: str = "(default)"
     data_path: Path = DEFAULT_DATA_PATH
     research_data_path: Path = DEFAULT_RESEARCH_DATA_PATH
+    memory_data_path: Path = DEFAULT_MEMORY_DATA_PATH
     allowed_origins: tuple[str, ...] = field(
         default_factory=lambda: DEFAULT_ALLOWED_ORIGINS
     )
     max_request_bytes: int = 64_000
     max_context_characters: int = 64_000
+    memory_retrieval_limit: int = 5
+    memory_max_context_characters: int = 4_000
+    memory_provider: str = "rules"
+    memory_model: str = DEFAULT_MEMORY_MODEL
+    memory_reasoning_effort: str = "low"
+    memory_timeout_seconds: float = 45.0
+    embedding_provider: str = "local"
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    embedding_dimensions: int = 256
+    memory_semantic_threshold: float = 0.68
     host: str = "127.0.0.1"
     port: int = 8000
     provider: str = "fake"
@@ -110,6 +124,36 @@ class Settings:
             raise ValueError("MIND_MAX_REQUEST_BYTES must be positive.")
         if self.max_context_characters < 1:
             raise ValueError("MIND_MAX_CONTEXT_CHARACTERS must be positive.")
+        if not 1 <= self.memory_retrieval_limit <= 20:
+            raise ValueError("MIND_MEMORY_RETRIEVAL_LIMIT must be between 1 and 20.")
+        if not 256 <= self.memory_max_context_characters <= 16_000:
+            raise ValueError(
+                "MIND_MEMORY_MAX_CONTEXT_CHARACTERS must be between 256 and 16000."
+            )
+        if self.memory_provider not in {"rules", "openai"}:
+            raise ValueError("MIND_MEMORY_PROVIDER must be rules or openai.")
+        if self.embedding_provider not in {"local", "openai"}:
+            raise ValueError("MIND_EMBEDDING_PROVIDER must be local or openai.")
+        if not self.memory_model or any(
+            character.isspace() for character in self.memory_model
+        ):
+            raise ValueError("MIND_MEMORY_MODEL must be a non-empty model ID.")
+        if self.memory_reasoning_effort not in {"none", "low", "medium", "high"}:
+            raise ValueError("MIND_MEMORY_REASONING_EFFORT is unsupported.")
+        if self.memory_timeout_seconds <= 0:
+            raise ValueError("MIND_MEMORY_TIMEOUT_SECONDS must be positive.")
+        if not self.embedding_model or any(
+            character.isspace() for character in self.embedding_model
+        ):
+            raise ValueError("MIND_EMBEDDING_MODEL must be a non-empty model ID.")
+        if not 32 <= self.embedding_dimensions <= 2_048:
+            raise ValueError(
+                "MIND_EMBEDDING_DIMENSIONS must be between 32 and 2048."
+            )
+        if not 0 <= self.memory_semantic_threshold <= 1:
+            raise ValueError(
+                "MIND_MEMORY_SEMANTIC_THRESHOLD must be between 0 and 1."
+            )
         if not 1 <= self.port <= 65_535:
             raise ValueError("MIND_API_PORT must be between 1 and 65535.")
         if self.provider not in {"fake", "deepseek"}:
@@ -201,6 +245,13 @@ class Settings:
             )
         if self.openai_timeout_seconds <= 0:
             raise ValueError("MIND_OPENAI_TIMEOUT_SECONDS must be positive.")
+        if (
+            self.memory_provider == "openai"
+            or self.embedding_provider == "openai"
+        ) and not (self.openai_api_key and self.openai_api_key.strip()):
+            raise ValueError(
+                "OPENAI_API_KEY is required for OpenAI Memory or Embeddings."
+            )
         if environment in {"staging", "production"}:
             if self.auth_provider != "firebase":
                 raise ValueError(
@@ -219,6 +270,11 @@ class Settings:
             if not (self.openai_api_key and self.openai_api_key.strip()):
                 raise ValueError(
                     "OPENAI_API_KEY is required outside development or test."
+                )
+            if self.memory_provider != "openai" or self.embedding_provider != "openai":
+                raise ValueError(
+                    "OpenAI Memory extraction and Embeddings are required outside "
+                    "development or test."
                 )
 
     @classmethod
@@ -261,6 +317,12 @@ class Settings:
                     str(DEFAULT_RESEARCH_DATA_PATH),
                 )
             ),
+            memory_data_path=Path(
+                os.environ.get(
+                    "MIND_MEMORY_DATA_PATH",
+                    str(DEFAULT_MEMORY_DATA_PATH),
+                )
+            ),
             allowed_origins=_csv(
                 os.environ.get("MIND_ALLOWED_ORIGINS"),
                 DEFAULT_ALLOWED_ORIGINS,
@@ -270,6 +332,38 @@ class Settings:
             ),
             max_context_characters=int(
                 os.environ.get("MIND_MAX_CONTEXT_CHARACTERS", "64000")
+            ),
+            memory_retrieval_limit=int(
+                os.environ.get("MIND_MEMORY_RETRIEVAL_LIMIT", "5")
+            ),
+            memory_max_context_characters=int(
+                os.environ.get("MIND_MEMORY_MAX_CONTEXT_CHARACTERS", "4000")
+            ),
+            memory_provider=os.environ.get("MIND_MEMORY_PROVIDER", "rules"),
+            memory_model=os.environ.get(
+                "MIND_MEMORY_MODEL",
+                DEFAULT_MEMORY_MODEL,
+            ),
+            memory_reasoning_effort=os.environ.get(
+                "MIND_MEMORY_REASONING_EFFORT",
+                "low",
+            ),
+            memory_timeout_seconds=float(
+                os.environ.get("MIND_MEMORY_TIMEOUT_SECONDS", "45")
+            ),
+            embedding_provider=os.environ.get(
+                "MIND_EMBEDDING_PROVIDER",
+                "local",
+            ),
+            embedding_model=os.environ.get(
+                "MIND_EMBEDDING_MODEL",
+                DEFAULT_EMBEDDING_MODEL,
+            ),
+            embedding_dimensions=int(
+                os.environ.get("MIND_EMBEDDING_DIMENSIONS", "256")
+            ),
+            memory_semantic_threshold=float(
+                os.environ.get("MIND_MEMORY_SEMANTIC_THRESHOLD", "0.68")
             ),
             host=os.environ.get("MIND_API_HOST", "127.0.0.1"),
             port=int(os.environ.get("MIND_API_PORT", "8000")),
