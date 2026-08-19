@@ -11,6 +11,7 @@ from math import ceil
 from typing import Any, cast
 from uuid import UUID
 
+from .memory_service import MemoryService
 from .models import (
     AgentMode,
     ResearchBrief,
@@ -99,6 +100,7 @@ class ResearchService:
         min_citation_coverage: float = DEFAULT_MIN_CITATION_COVERAGE,
         job_timeout_seconds: int = 600,
         max_tool_calls_per_task: int = 8,
+        memory_service: MemoryService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.conversations = conversations
@@ -113,6 +115,7 @@ class ResearchService:
         self.min_citation_coverage = min_citation_coverage
         self.job_timeout_seconds = job_timeout_seconds
         self.max_tool_calls_per_task = max_tool_calls_per_task
+        self.memory_service = memory_service
         self.logger = logger or logging.getLogger(__name__)
 
     def start_job(self, request: ResearchRequest, user_id: str) -> ResearchJob:
@@ -129,6 +132,12 @@ class ResearchService:
             max_tool_call_overrun=self._configured_tool_call_overrun(),
             timeout_seconds=self.job_timeout_seconds,
         )
+        memory_ids: list[UUID] = []
+        if self.memory_service is not None:
+            memory_ids, _ = self.memory_service.context_for_query(
+                user_id,
+                request.query,
+            )
         job = ResearchJob(
             user_id=user_id,
             conversation_id=UUID(conversation_id),
@@ -136,6 +145,7 @@ class ResearchService:
             model=self.provider.model,
             prompt_version=PROMPT_VERSION,
             budget=budget,
+            memory_ids=memory_ids,
         )
         job.checkpoint.subtasks.append(self._brief_task(job))
         job = self.jobs.create_job(job)
@@ -953,6 +963,19 @@ class ResearchService:
         job.provider_status = "completed"
         job.progress = 1.0
         job.failure_reason = None
+        if self.memory_service is not None:
+            try:
+                self.memory_service.capture_research_report_candidates(
+                    user_id=job.user_id,
+                    conversation_id=job.conversation_id,
+                    research_job_id=job.id,
+                    report=normalized,
+                )
+            except Exception:
+                self.logger.exception(
+                    "research_memory_candidate_capture_failed",
+                    extra={"event_data": {"job_id": str(job.id)}},
+                )
 
     def _report_citation_coverage(
         self,
@@ -1204,6 +1227,7 @@ class ResearchService:
 
     def _brief_request(self, job: ResearchJob) -> ResearchProviderRequest:
         official_requirements = _official_topic_requirements(job.query)
+        memory_context = self._memory_context(job)
         prompt = f"""You are the planning stage of Mind's Research Harness.
 Clarify the user's research goal without asking a follow-up question. Produce a
 bounded Research Brief and decompose it into 4 to {job.budget.max_subquestions}
@@ -1211,6 +1235,8 @@ independent, non-overlapping research subquestions.
 
 User request:
 {job.query}
+
+{memory_context}
 
 {official_requirements}
 
@@ -1317,6 +1343,7 @@ fences."""
             else "No separate verification record."
         )
         official_requirements = _official_topic_requirements(job.query)
+        memory_context = self._memory_context(job)
         prompt = f"""You are the final writing stage of Mind's Research Harness.
 Write one clear, comprehensive answer to the original request using only the
 collected evidence. Reconcile only true unresolved conflicts explicitly and state
@@ -1342,6 +1369,8 @@ section at the end listing the most important source markers.
 Original request:
 {job.query}
 
+{memory_context}
+
 {official_requirements}
 
 Evidence verification:
@@ -1351,6 +1380,12 @@ Evidence and source ledger:
 {self._evidence_packet(job)}
 """
         return ResearchProviderRequest(prompt=prompt, task_kind="synthesis")
+
+    def _memory_context(self, job: ResearchJob) -> str:
+        if self.memory_service is None or not job.memory_ids:
+            return "No confirmed user memory was selected for this task."
+        context = self.memory_service.context_for_ids(job.user_id, job.memory_ids)
+        return context or "No currently enabled user memory applies to this task."
 
     def _required_official_source_gaps(
         self,
@@ -1765,6 +1800,7 @@ Evidence and source ledger:
             "budget_exceeded": job.budget_exceeded,
             "hard_budget_reached": job.hard_budget_reached,
             "citation_coverage": job.citation_coverage,
+            "memory_ids": [str(memory_id) for memory_id in job.memory_ids],
         }
 
     def _completed_events(
@@ -1809,6 +1845,7 @@ Evidence and source ledger:
             "budget_exceeded": job.budget_exceeded,
             "hard_budget_reached": job.hard_budget_reached,
             "citation_coverage": job.citation_coverage,
+            "memory_ids": [str(memory_id) for memory_id in job.memory_ids],
             "citations": [
                 citation.model_dump(mode="json")
                 for citation in job.checkpoint.citations

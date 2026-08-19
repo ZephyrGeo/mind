@@ -18,6 +18,11 @@ Interactive documentation is available while the API is running:
 | `GET` | `/api/conversations` | Bearer token | Conversation summaries for the current user |
 | `GET` | `/api/conversations/{conversation_id}` | Bearer token | Full tenant-scoped conversation for reopening and context |
 | `DELETE` | `/api/conversations/{conversation_id}` | Bearer token | Permanently delete one owned conversation; returns 204 |
+| `GET` | `/api/memories` | Bearer token | List the complete ledger, including active, review, stale, conflicting, and superseded entries |
+| `POST` | `/api/memories` | Bearer token | Add an immediately confirmed manual memory |
+| `POST` | `/api/memories/{memory_id}/confirm` | Bearer token | Confirm a candidate, conflict, update, or stale fact; accepted replacements supersede the prior version |
+| `PATCH` | `/api/memories/{memory_id}` | Bearer token | Edit, pin, enable/disable, retype, or expire one owned memory |
+| `DELETE` | `/api/memories/{memory_id}` | Bearer token | Permanently delete one owned memory; returns 204 |
 | `DELETE` | `/api/account` | Bearer token + recent sign-in | Stop active Research, delete owned data, and delete the Firebase identity |
 | `POST` | `/api/chat` | Bearer token | Stream an assistant response using Server-Sent Events |
 | `POST` | `/api/research` | Bearer token | Create and stream a checkpointed research job |
@@ -98,8 +103,15 @@ data: {"type":"delta","delta":"I’m "}
 
 data: {"type":"delta","delta":"Mind’s "}
 
-data: {"type":"done","conversation_id":"...","request_id":"..."}
+data: {"type":"done","conversation_id":"...","memory_ids":["..."],"memory_candidate_count":1,"memory_candidates":[{"id":"...","type":"project","status":"candidate","review_reason":"update"}],"memory_saved_count":0,"request_id":"..."}
 ```
+
+`memory_candidate_count` counts inferred, sensitive, conflicting, stale, or
+Research-derived changes that need review. `memory_saved_count` counts explicit
+non-sensitive “remember this” statements saved immediately. Questions and
+ordinary requests produce neither. `memory_candidates` contains the authenticated
+user's review-item IDs and bounded classification metadata so the UI can open and
+focus the corresponding Memory card without exposing internal embeddings.
 
 If generation fails after streaming has begun, the final frame has
 `"type":"error"`. Provider failures include a stable `code` and `retryable`
@@ -166,6 +178,45 @@ budgets, persistence, polling, SSE progress, cancel-all, refresh recovery, and
 idempotent assistant-message writes. It depends only on `ResearchProvider`, not
 on an SDK, concrete client, or a specialized Deep Research model.
 
+`MemoryProvider` extracts bounded structured `create`, `update`, `conflict`, or
+`ignore` memory groups. The production `OpenAIMemoryProvider` uses strict Responses
+API JSON Schema output and first partitions durable facts by specific subject and
+shared update/expiry/delete lifecycle. Facts are not grouped merely because they
+appear in one message, conversation, or broad category. Each group has one stable
+`canonical_key`, one display summary, and bounded facets retained for semantic
+retrieval; duplicate model output for the same key is consolidated by the backend.
+Tests and zero-cost local development use deterministic rules. Questions, ordinary
+requests, credentials, and exact duplicates are discarded. Inferred, sensitive,
+Research-derived, update, and conflict groups stay disabled until review. Explicit
+non-sensitive “remember this” statements activate immediately. A user-owned resume
+or professional-profile summary is one atomic `fact:professional-profile` group;
+jobs, education, and skills are facets rather than separate ledger entries, and a
+later profile replaces it as one update.
+
+`MemoryRepository` owns the complete tenant-scoped Memory Ledger. Entries record
+provenance, confidence, sensitivity, canonical identity, revision, related and
+superseded IDs, extraction/embedding model, verification time, stale time, and
+expiry. Confirming an update or conflict activates the selected version and
+keeps the prior version as disabled `superseded` provenance. Stale information is
+disabled for revalidation and nothing is silently deleted.
+
+`MemoryRetriever` embeds the group summary together with its facets, combines
+semantic and lexical relevance, and selects only
+active, enabled, unexpired, non-stale entries. Production generates normalized
+OpenAI `text-embedding-3-small` vectors and uses Firestore nearest-neighbor
+search; existing entries are backfilled lazily. A bounded scan/lexical fallback
+keeps context available during embedding outages or while the vector index is
+building. Selected memory IDs are exposed in Chat completion frames and
+persisted on Research Jobs. Disabling, superseding, deleting, expiring, or
+staling a memory prevents future retrieval.
+
+The upstream contracts are documented in OpenAI's official
+[Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
+and [Embeddings](https://developers.openai.com/api/docs/guides/embeddings)
+guides and Google's official
+[Firestore vector search](https://firebase.google.com/docs/firestore/vector-search)
+guide.
+
 The wire format and current model IDs follow the
 [official DeepSeek Chat Completions documentation](https://api-docs.deepseek.com/api/create-chat-completion).
 
@@ -193,5 +244,5 @@ calling the endpoint.
 
 The shared Pydantic models define `User`, `Conversation`, `Message`,
 `Attachment`, typed research jobs/checkpoints/sources/citations, `Memory`,
-`Routine`, and `ToolCall`. Memory, routine, file, and voice repositories and
-endpoints remain future work.
+`Routine`, and `ToolCall`. Routine, file, and voice repositories and endpoints
+remain future work.

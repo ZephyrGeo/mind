@@ -74,19 +74,24 @@ class DeepSeekProvider:
         mode: AgentMode,
         *,
         history: Sequence[ModelMessage] = (),
+        memory_context: str = "",
     ) -> Iterator[str]:
         normalized_mode = AgentMode(mode)
         thinking_enabled = normalized_mode == AgentMode.RESEARCH
+        base_system_prompt = (
+            RESEARCH_SYSTEM_PROMPT if thinking_enabled else CHAT_SYSTEM_PROMPT
+        )
+        system_prompt = (
+            f"{base_system_prompt}\n\n{memory_context}"
+            if memory_context
+            else base_system_prompt
+        )
         request_body = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        RESEARCH_SYSTEM_PROMPT
-                        if thinking_enabled
-                        else CHAT_SYSTEM_PROMPT
-                    ),
+                    "content": system_prompt,
                 },
                 *[
                     {
@@ -118,7 +123,7 @@ class DeepSeekProvider:
                 "Accept": "text/event-stream",
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "mind-personal-agent/0.6",
+                "User-Agent": "mind-personal-agent/0.7",
             },
         )
 

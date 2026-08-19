@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
+from .memory_embedding import coerce_float_list, cosine_similarity
+from .memory_store import MemoryNotFoundError
 from .models import (
     AgentMode,
     Conversation,
     ConversationSummary,
+    Memory,
     Message,
     MessageRole,
     ResearchJob,
@@ -30,6 +33,21 @@ def _utc_now() -> datetime:
 
 def _json_document(model: Any) -> dict[str, Any]:
     return model.model_dump(mode="json")
+
+
+def _public_memory_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in {"embedding", "vector_distance"}
+    }
+
+
+def _vector_values(value: object) -> list[float]:
+    raw = getattr(value, "value", value)
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+        return []
+    return coerce_float_list(cast(Sequence[object], raw)) or []
 
 
 class _FirestoreRepository:
@@ -428,6 +446,205 @@ class FirestoreConversationRepository(_FirestoreRepository):
             return message_id
 
         return str(self._run_transaction(operation))
+
+
+class FirestoreMemoryRepository(_FirestoreRepository):
+    """Persist the complete user-controlled Memory Ledger below one user."""
+
+    def _memories(self, user_id: str) -> Any:
+        return self._user(user_id).collection("memories")
+
+    def _memory(self, user_id: str, memory_id: UUID | str) -> Any:
+        return self._memories(user_id).document(str(memory_id))
+
+    def list_memories(self, user_id: str) -> list[Memory]:
+        query = self._memories(user_id).order_by(
+            "updated_at",
+            direction=self._descending,
+        )
+        memories: list[Memory] = []
+        for snapshot in query.stream():
+            payload = cast(dict[str, Any], snapshot.to_dict() or {})
+            if payload.get("user_id") == user_id:
+                memories.append(
+                    Memory.model_validate(_public_memory_payload(payload))
+                )
+        return memories
+
+    def get_memory(self, memory_id: UUID | str, user_id: str) -> Memory:
+        snapshot = self._memory(user_id, memory_id).get()
+        payload = self._require_owned_document(
+            snapshot,
+            user_id=user_id,
+            error=MemoryNotFoundError,
+            message="Memory does not exist for this user.",
+        )
+        return Memory.model_validate(_public_memory_payload(payload))
+
+    def create_memory(self, memory: Memory) -> Memory:
+        reference = self._memory(memory.user_id, memory.id)
+
+        def operation(transaction: Any) -> Memory:
+            if reference.get(transaction=transaction).exists:
+                raise ValueError("Memory already exists.")
+            transaction.set(reference, _json_document(memory))
+            return memory
+
+        return self._run_transaction(operation)
+
+    def upsert_memory(self, memory: Memory) -> Memory:
+        reference = self._memory(memory.user_id, memory.id)
+
+        def operation(transaction: Any) -> Memory:
+            snapshot = reference.get(transaction=transaction)
+            if snapshot.exists:
+                payload = self._require_owned_document(
+                    snapshot,
+                    user_id=memory.user_id,
+                    error=MemoryNotFoundError,
+                    message="Memory does not exist for this user.",
+                )
+                return Memory.model_validate(_public_memory_payload(payload))
+            transaction.set(reference, _json_document(memory))
+            return memory
+
+        return self._run_transaction(operation)
+
+    def save_memory(self, memory: Memory, user_id: str) -> Memory:
+        if memory.user_id != user_id:
+            raise MemoryNotFoundError("Memory does not exist for this user.")
+        reference = self._memory(user_id, memory.id)
+
+        def operation(transaction: Any) -> Memory:
+            payload = self._require_owned_document(
+                reference.get(transaction=transaction),
+                user_id=user_id,
+                error=MemoryNotFoundError,
+                message="Memory does not exist for this user.",
+            )
+            document = _json_document(memory)
+            if "embedding" in payload:
+                document["embedding"] = payload["embedding"]
+                document["embedding_model"] = payload.get("embedding_model")
+            transaction.set(reference, document)
+            return memory
+
+        return self._run_transaction(operation)
+
+    def memory_embedding(
+        self,
+        memory_id: UUID | str,
+        user_id: str,
+    ) -> tuple[str, list[float]] | None:
+        payload = self._require_owned_document(
+            self._memory(user_id, memory_id).get(),
+            user_id=user_id,
+            error=MemoryNotFoundError,
+            message="Memory does not exist for this user.",
+        )
+        model = payload.get("embedding_model")
+        vector = _vector_values(payload.get("embedding"))
+        return (str(model), vector) if isinstance(model, str) and vector else None
+
+    def save_memory_embedding(
+        self,
+        memory_id: UUID | str,
+        user_id: str,
+        *,
+        model: str,
+        vector: list[float],
+    ) -> None:
+        reference = self._memory(user_id, memory_id)
+        self._require_owned_document(
+            reference.get(),
+            user_id=user_id,
+            error=MemoryNotFoundError,
+            message="Memory does not exist for this user.",
+        )
+        try:
+            from google.cloud.firestore_v1.vector import Vector
+        except ImportError as error:  # pragma: no cover - packaging guard
+            raise RuntimeError("Firestore vector support is unavailable.") from error
+        reference.update(
+            {
+                "embedding": Vector(vector),
+                "embedding_model": model,
+            }
+        )
+
+    def find_similar_memories(
+        self,
+        user_id: str,
+        vector: list[float],
+        *,
+        limit: int,
+    ) -> list[tuple[Memory, float]]:
+        try:
+            from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
+            from google.cloud.firestore_v1.vector import Vector
+
+            query = self._memories(user_id).find_nearest(
+                "embedding",
+                Vector(vector),
+                max(1, limit),
+                DistanceMeasure.COSINE,
+                distance_result_field="vector_distance",
+            )
+            matches: list[tuple[Memory, float]] = []
+            for snapshot in query.stream():
+                payload = cast(dict[str, Any], snapshot.to_dict() or {})
+                if payload.get("user_id") != user_id:
+                    continue
+                distance = float(payload.get("vector_distance", 1.0))
+                matches.append(
+                    (
+                        Memory.model_validate(_public_memory_payload(payload)),
+                        max(-1.0, min(1.0, 1.0 - distance)),
+                    )
+                )
+            return matches
+        except Exception:
+            # A bounded scan keeps a new or locally emulated database functional
+            # while its vector index is still building. Production deployment also
+            # creates the index so this is not the steady-state query path.
+            return self._scan_vector_matches(user_id, vector, limit=limit)
+
+    def _scan_vector_matches(
+        self,
+        user_id: str,
+        vector: list[float],
+        *,
+        limit: int,
+    ) -> list[tuple[Memory, float]]:
+        matches: list[tuple[Memory, float]] = []
+        for snapshot in self._memories(user_id).limit(200).stream():
+            payload = cast(dict[str, Any], snapshot.to_dict() or {})
+            if payload.get("user_id") != user_id:
+                continue
+            stored = _vector_values(payload.get("embedding"))
+            if not stored:
+                continue
+            matches.append(
+                (
+                    Memory.model_validate(_public_memory_payload(payload)),
+                    cosine_similarity(vector, stored),
+                )
+            )
+        matches.sort(key=lambda item: item[1], reverse=True)
+        return matches[:limit]
+
+    def delete_memory(self, memory_id: UUID | str, user_id: str) -> None:
+        reference = self._memory(user_id, memory_id)
+        self._require_owned_document(
+            reference.get(),
+            user_id=user_id,
+            error=MemoryNotFoundError,
+            message="Memory does not exist for this user.",
+        )
+        reference.delete()
+
+    def delete_for_user(self, user_id: str) -> None:
+        self._delete_collection(self._memories(user_id))
 
 
 class FirestoreResearchRepository(_FirestoreRepository):

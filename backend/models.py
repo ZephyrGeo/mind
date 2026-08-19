@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -73,6 +73,41 @@ class ToolCallStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     DENIED = "denied"
+
+
+class MemoryType(str, Enum):
+    GOAL = "goal"
+    PREFERENCE = "preference"
+    PROJECT = "project"
+    FACT = "fact"
+    DECISION = "decision"
+
+
+class MemorySensitivity(str, Enum):
+    NORMAL = "normal"
+    SENSITIVE = "sensitive"
+
+
+class MemoryStatus(str, Enum):
+    CANDIDATE = "candidate"
+    ACTIVE = "active"
+    STALE = "stale"
+    SUPERSEDED = "superseded"
+    CONFLICT = "conflict"
+
+
+class MemoryReviewReason(str, Enum):
+    INFERRED = "inferred"
+    SENSITIVE = "sensitive"
+    UPDATE = "update"
+    CONFLICT = "conflict"
+    RESEARCH = "research"
+
+
+class MemorySourceKind(str, Enum):
+    MANUAL = "manual"
+    CONVERSATION = "conversation"
+    RESEARCH_REPORT = "research_report"
 
 
 class User(StrictModel):
@@ -262,6 +297,7 @@ class ResearchJob(StrictModel):
     budget_exceeded: bool = False
     hard_budget_reached: bool = False
     citation_coverage: float | None = Field(default=None, ge=0, le=1)
+    memory_ids: list[UUID] = Field(default_factory=list[UUID], max_length=20)
     checkpoint: ResearchCheckpoint = Field(default_factory=ResearchCheckpoint)
     failure_reason: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -269,16 +305,106 @@ class ResearchJob(StrictModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class MemoryProvenance(StrictModel):
+    source_kind: MemorySourceKind = MemorySourceKind.MANUAL
+    conversation_id: UUID | None = None
+    source_message_id: UUID | None = None
+    research_job_id: UUID | None = None
+    excerpt: str = Field(default="", max_length=1_000)
+
+
 class Memory(StrictModel):
     id: UUID = Field(default_factory=uuid4)
     user_id: str
-    content: str
+    type: MemoryType = MemoryType.FACT
+    content: str = Field(min_length=1, max_length=1_000)
+    provenance: MemoryProvenance = Field(default_factory=MemoryProvenance)
+    sensitivity: MemorySensitivity = MemorySensitivity.NORMAL
+    status: MemoryStatus = MemoryStatus.CANDIDATE
+    review_reason: MemoryReviewReason | None = None
     source_message_id: UUID | None = None
     confidence: float = Field(default=1, ge=0, le=1)
     pinned: bool = False
+    enabled: bool = False
+    canonical_key: str = Field(default="", max_length=300)
+    facets: list[str] = Field(default_factory=list[str], max_length=12)
+    related_memory_ids: list[UUID] = Field(default_factory=list[UUID], max_length=20)
+    supersedes_id: UUID | None = None
+    revision: int = Field(default=1, ge=1)
+    extraction_model: str | None = Field(default=None, max_length=120)
+    embedding_model: str | None = Field(default=None, max_length=120)
+    valid_from: datetime | None = None
+    last_verified_at: datetime | None = None
+    stale_after: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("content")
+    @classmethod
+    def memory_content_must_contain_text(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("Memory content cannot be empty.")
+        return normalized
+
+    @field_validator("facets")
+    @classmethod
+    def memory_facets_must_contain_text(cls, values: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            normalized = " ".join(value.split())[:500]
+            key = normalized.casefold()
+            if normalized and key not in seen:
+                result.append(normalized)
+                seen.add(key)
+        return result
+
+
+class MemoryCreateRequest(StrictModel):
+    type: MemoryType = MemoryType.FACT
+    content: str = Field(min_length=1, max_length=1_000)
+    sensitivity: MemorySensitivity = MemorySensitivity.NORMAL
+    pinned: bool = False
+    expires_at: datetime | None = None
+
+    @field_validator("content")
+    @classmethod
+    def content_must_contain_text(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("Memory content cannot be empty.")
+        return normalized
+
+
+class MemoryUpdateRequest(StrictModel):
+    type: MemoryType | None = None
+    content: str | None = Field(default=None, min_length=1, max_length=1_000)
+    sensitivity: MemorySensitivity | None = None
+    pinned: bool | None = None
+    enabled: bool | None = None
+    expires_at: datetime | None = None
+
+    @field_validator("content")
+    @classmethod
+    def optional_content_must_contain_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("Memory content cannot be empty.")
+        return normalized
+
+    @model_validator(mode="after")
+    def at_least_one_field_is_required(self) -> "MemoryUpdateRequest":
+        if not self.model_fields_set:
+            raise ValueError("At least one memory field must be updated.")
+        return self
+
+
+class MemoriesResponse(StrictModel):
+    memories: list[Memory]
 
 
 class Routine(StrictModel):

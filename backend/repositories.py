@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
-from .models import AgentMode, Conversation, ConversationSummary
+from .models import AgentMode, Conversation, ConversationSummary, Memory
 
 
 class ConversationRepository(Protocol):
@@ -71,5 +71,74 @@ class ConversationRepository(Protocol):
         research_job_id: UUID | str | None = None,
     ) -> str:
         """Persist one assistant message, idempotently for a research job."""
+
+        ...
+
+
+class MemoryRepository(Protocol):
+    def list_memories(self, user_id: str) -> list[Memory]:
+        """Return every Memory Ledger entry owned by exactly one user."""
+
+        ...
+
+    def get_memory(self, memory_id: UUID | str, user_id: str) -> Memory:
+        """Return one owned memory or raise MemoryNotFoundError."""
+
+        ...
+
+    def create_memory(self, memory: Memory) -> Memory:
+        """Create a memory with a unique ID."""
+
+        ...
+
+    def upsert_memory(self, memory: Memory) -> Memory:
+        """Idempotently persist an extracted memory candidate."""
+
+        ...
+
+    def save_memory(self, memory: Memory, user_id: str) -> Memory:
+        """Persist a user-controlled change to an owned memory."""
+
+        ...
+
+    def memory_embedding(
+        self,
+        memory_id: UUID | str,
+        user_id: str,
+    ) -> tuple[str, list[float]] | None:
+        """Return the stored embedding model and vector, if present."""
+
+        ...
+
+    def save_memory_embedding(
+        self,
+        memory_id: UUID | str,
+        user_id: str,
+        *,
+        model: str,
+        vector: list[float],
+    ) -> None:
+        """Persist an embedding without exposing it through the public model."""
+
+        ...
+
+    def find_similar_memories(
+        self,
+        user_id: str,
+        vector: list[float],
+        *,
+        limit: int,
+    ) -> list[tuple[Memory, float]]:
+        """Return nearest memories with cosine similarity in descending order."""
+
+        ...
+
+    def delete_memory(self, memory_id: UUID | str, user_id: str) -> None:
+        """Permanently delete one owned memory."""
+
+        ...
+
+    def delete_for_user(self, user_id: str) -> None:
+        """Delete every memory owned by one user."""
 
         ...

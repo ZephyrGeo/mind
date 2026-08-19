@@ -329,7 +329,8 @@ Vector retrieval is introduced only for the Memory Ledger:
     └── FirestoreVectorRetriever
 
 The local retriever may use deterministic fake embeddings, keyword scoring, or
-small in-process cosine similarity. Production may use Firestore vector search.
+small in-process cosine similarity. Production uses OpenAI embeddings and
+Firestore vector search with bounded fallback while its index is unavailable.
 
 Memory retrieval must not block the initial OpenAI Research integration.
 
@@ -532,20 +533,36 @@ Exit criteria:
 
 Estimated effort: 3–4 days
 
+Status: Intelligent Memory MVP implemented. Local JSON and Firestore repositories
+share the same boundary. Production uses strict OpenAI structured extraction,
+OpenAI embeddings, and a 256-dimension Firestore vector index behind replaceable
+provider/retriever interfaces. Deterministic extraction and hashed embeddings
+remain local/test fallbacks only.
+
 Implement the first original feature:
 
 - typed memory candidates from conversations and reports;
+- reject questions, requests, quoted text, and credentials before persistence;
 - provenance, confidence, and sensitive-data filtering;
 - explicit user confirmation for important or sensitive memories;
+- exact and semantic deduplication, LLM-assisted update/conflict classification,
+  superseded history, and stale-memory revalidation without silent deletion;
 - inspect, pin, edit, disable, delete, and expire controls;
 - relevant-memory retrieval before Chat and Research;
-- local MemoryRetriever and production FirestoreVectorRetriever boundaries.
+- local MemoryRetriever and production FirestoreVectorRetriever boundaries;
+- lazy embedding backfill for existing ledger entries.
 
 Exit criteria:
 
 - Relevant user goals and preferences can affect a later result.
 - Users can see and control everything Mind remembers.
 - Deleted or disabled memories are not retrieved.
+- Conflicting or stale information stays out of context until the user resolves
+  or reconfirms it.
+
+Deferred beyond this Friday MVP: automatic Research Watch scheduling, long-term
+importance decay, bulk migration tooling for very large ledgers, and a broad
+offline memory-quality benchmark suite.
 
 ### Phase 5 — Research Watch, Heartbeat, and Insight Diff
 

@@ -63,6 +63,23 @@ test("built page contains the Mind product shell", async () => {
   assert.match(bundle, /target:\s*"_blank"/);
   assert.match(bundle, /\/cancel/);
   assert.match(bundle, /sources collected/);
+  assert.match(bundle, /Search memories/);
+  assert.match(bundle, /\/api\/memories/);
+  assert.match(bundle, /Confirm memory/);
+  assert.match(bundle, /Needs attention/);
+  assert.match(bundle, /Update suggested/);
+  assert.match(bundle, /Use this version/);
+  assert.match(bundle, /Needs revalidation/);
+  assert.match(bundle, /replaced memories/);
+  assert.match(bundle, /Memory update needs review/);
+  assert.match(bundle, /Review memory/);
+  assert.match(bundle, /memories need review/);
+  assert.match(bundle, /memory_candidates/);
+  assert.match(bundle, /scrollIntoView/);
+  assert.match(bundle, /Research job:/);
+  assert.match(bundle, /Conversation:/);
+  assert.match(bundle, /Sensitive credentials are rejected and never saved/);
+  assert.match(bundle, /method:\s*"PATCH"/);
 });
 
 test("built stylesheet includes responsive and reduced-motion behavior", async () => {
@@ -85,4 +102,15 @@ test("built stylesheet includes responsive and reduced-motion behavior", async (
   assert.match(css, /\.research-progress-meta/);
   assert.match(css, /\.markdown-content/);
   assert.match(css, /\.message-link/);
+  assert.match(css, /\.memory-ledger/);
+  assert.match(css, /PingFang SC/);
+  assert.match(css, /\.memory-list/);
+  assert.match(css, /\.memory-row-detail/);
+  assert.match(css, /\.memory-row\.review/);
+  assert.match(css, /\.memory-row\.status-conflict/);
+  assert.match(css, /\.memory-previous/);
+  assert.match(css, /\.memory-actions/);
+  assert.match(css, /\.memory-review-notice/);
+  assert.match(css, /\.nav-badge/);
+  assert.match(css, /\.memory-row\.focused/);
 });

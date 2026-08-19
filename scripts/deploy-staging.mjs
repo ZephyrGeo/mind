@@ -150,6 +150,64 @@ function ensureServiceAccount(accountName, accountEmail, displayName) {
   ]);
 }
 
+function ensureMemoryVectorIndex() {
+  const dimensions = Number(process.env.MIND_EMBEDDING_DIMENSIONS ?? "256");
+  if (!Number.isInteger(dimensions) || dimensions < 32 || dimensions > 2048) {
+    throw new Error("MIND_EMBEDDING_DIMENSIONS must be an integer from 32 to 2048.");
+  }
+  const rawIndexes = run(
+    gcloud,
+    [
+      "firestore",
+      "indexes",
+      "composite",
+      "list",
+      "--project",
+      projectId,
+      "--database",
+      "(default)",
+      "--format=json",
+    ],
+    { capture: true },
+  );
+  const indexes = rawIndexes ? JSON.parse(rawIndexes) : [];
+  const exists = indexes.some(
+    (index) =>
+      index.collectionGroup === "memories" &&
+      index.queryScope === "COLLECTION" &&
+      index.fields?.some(
+        (field) =>
+          field.fieldPath === "embedding" &&
+          Number(field.vectorConfig?.dimension) === dimensions,
+      ),
+  );
+  if (exists) {
+    console.log(`Reusing the ${dimensions}-dimension Memory vector index.`);
+    return;
+  }
+  run(gcloud, [
+    "firestore",
+    "indexes",
+    "composite",
+    "create",
+    "--project",
+    projectId,
+    "--database",
+    "(default)",
+    "--collection-group",
+    "memories",
+    "--query-scope",
+    "COLLECTION",
+    "--field-config",
+    `field-path=embedding,vector-config={dimension=${dimensions},flat}`,
+    "--async",
+    "--quiet",
+  ]);
+  console.log(
+    "Memory vector index creation started; bounded fallback retrieval remains available while it builds.",
+  );
+}
+
 const openaiApiKey = requireValue("OPENAI_API_KEY");
 const deepseekApiKey = requireValue("DEEPSEEK_API_KEY");
 const allowedEmails = requireValue("MIND_ALLOWED_USER_EMAILS");
@@ -254,6 +312,7 @@ run("firebase", [
   "firestore:rules,firestore:indexes",
   "--non-interactive",
 ]);
+ensureMemoryVectorIndex();
 
 const envFlag = gcloudDictionary([
   "MIND_ENV=staging",
@@ -264,6 +323,16 @@ const envFlag = gcloudDictionary([
   "MIND_FIREBASE_CHECK_REVOKED=1",
   "MIND_PERSISTENCE_PROVIDER=firestore",
   "MIND_FIRESTORE_DATABASE_ID=(default)",
+  `MIND_MEMORY_RETRIEVAL_LIMIT=${process.env.MIND_MEMORY_RETRIEVAL_LIMIT ?? "5"}`,
+  `MIND_MEMORY_MAX_CONTEXT_CHARACTERS=${process.env.MIND_MEMORY_MAX_CONTEXT_CHARACTERS ?? "4000"}`,
+  "MIND_MEMORY_PROVIDER=openai",
+  `MIND_MEMORY_MODEL=${process.env.MIND_MEMORY_MODEL ?? "gpt-5.4-mini"}`,
+  `MIND_MEMORY_REASONING_EFFORT=${process.env.MIND_MEMORY_REASONING_EFFORT ?? "low"}`,
+  `MIND_MEMORY_TIMEOUT_SECONDS=${process.env.MIND_MEMORY_TIMEOUT_SECONDS ?? "45"}`,
+  "MIND_EMBEDDING_PROVIDER=openai",
+  `MIND_EMBEDDING_MODEL=${process.env.MIND_EMBEDDING_MODEL ?? "text-embedding-3-small"}`,
+  `MIND_EMBEDDING_DIMENSIONS=${process.env.MIND_EMBEDDING_DIMENSIONS ?? "256"}`,
+  `MIND_MEMORY_SEMANTIC_THRESHOLD=${process.env.MIND_MEMORY_SEMANTIC_THRESHOLD ?? "0.68"}`,
   `MIND_ALLOWED_ORIGINS=${hostingOrigins}`,
   "MIND_MODEL_PROVIDER=deepseek",
   `MIND_DEEPSEEK_MODEL=${process.env.MIND_DEEPSEEK_MODEL ?? "deepseek-v4-flash"}`,

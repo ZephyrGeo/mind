@@ -214,7 +214,7 @@ class OpenAIResearchProvider:
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "mind-personal-agent/0.6",
+                "User-Agent": "mind-personal-agent/0.7",
             },
         )
         try:

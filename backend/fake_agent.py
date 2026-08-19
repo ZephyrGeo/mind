@@ -51,9 +51,20 @@ class FakeAgentProvider:
         mode: AgentMode | str = AgentMode.CHAT,
         *,
         history: Sequence[ModelMessage] = (),
+        memory_context: str = "",
     ) -> Iterator[str]:
         del history
         reply = self.create_reply(message, mode)
+        if memory_context:
+            remembered = next(
+                (
+                    line.removeprefix("- ").strip()
+                    for line in memory_context.splitlines()
+                    if line.startswith("- ")
+                ),
+                "confirmed Memory Ledger context",
+            )
+            reply = f"I used this relevant memory: {remembered}\n\n{reply}"
         for token in re.findall(r"\S+\s*|\n", reply):
             if self.delay_seconds:
                 time.sleep(self.delay_seconds)
