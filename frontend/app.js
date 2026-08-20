@@ -50,6 +50,31 @@ function routeHash(view, mode) {
   return mode === "research" ? "#/research" : "#/chat";
 }
 
+function researchRetrySnapshot(job) {
+  const retryTasks = (job.checkpoint?.subtasks ?? []).filter(
+    (task) => task.status === "retry_wait",
+  );
+  const retryTimes = [
+    job.provider_backoff_until,
+    ...retryTasks.map((task) => task.next_retry_at),
+  ]
+    .filter(Boolean)
+    .map((value) => Date.parse(value))
+    .filter(Number.isFinite);
+  const nextRetryAt = retryTimes.length ? Math.min(...retryTimes) : null;
+  return {
+    recoveryState: job.provider_backoff_until
+      ? "rate_limited"
+      : retryTasks.length
+        ? "retrying"
+        : null,
+    retryAfterSeconds:
+      nextRetryAt == null
+        ? 0
+        : Math.max(0, Math.ceil((nextRetryAt - Date.now()) / 1000)),
+  };
+}
+
 const suggestions = [
   {
     title: "Turn a fuzzy goal into next steps",
@@ -143,10 +168,7 @@ function Sidebar({
 }) {
   const [conversationQuery, setConversationQuery] = useState("");
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-  const [collapsedSections, setCollapsedSections] = useState({
-    Chats: false,
-    Research: false,
-  });
+  const [conversationsCollapsed, setConversationsCollapsed] = useState(false);
   const hasProfileActions = Boolean(onSignOut || onDeleteAccount);
   const searchRef = useRef(null);
   const normalizedQuery = conversationQuery.trim().toLocaleLowerCase();
@@ -155,22 +177,6 @@ function Sidebar({
         conversation.title.toLocaleLowerCase().includes(normalizedQuery),
       )
     : conversations;
-  const conversationSections = [
-    {
-      label: "Chats",
-      icon: "chat-circle",
-      conversations: visibleConversations.filter(
-        (conversation) => (conversation.mode ?? "chat") !== "research",
-      ),
-    },
-    {
-      label: "Research",
-      icon: "magnifying-glass",
-      conversations: visibleConversations.filter(
-        (conversation) => conversation.mode === "research",
-      ),
-    },
-  ];
 
   useEffect(() => {
     function focusConversationSearch(event) {
@@ -288,52 +294,43 @@ function Sidebar({
     h(
       "div",
       { className: "conversation-list" },
-      conversationSections.map((section) =>
+      h(
+        "section",
+        {
+          className: `conversation-category${
+            conversationsCollapsed ? " collapsed" : ""
+          }`,
+        },
         h(
-          "section",
+          "button",
           {
-            className: `conversation-category${
-              collapsedSections[section.label] ? " collapsed" : ""
-            }`,
-            key: section.label,
+            className: "conversation-category-label",
+            type: "button",
+            onClick: () => setConversationsCollapsed((current) => !current),
+            "aria-expanded": !conversationsCollapsed,
+            "aria-label": `${
+              conversationsCollapsed ? "Expand" : "Collapse"
+            } chats and researches`,
           },
-          h(
-            "button",
-            {
-              className: "conversation-category-label",
-              type: "button",
-              onClick: () =>
-                setCollapsedSections((current) => ({
-                  ...current,
-                  [section.label]: !current[section.label],
-                })),
-              "aria-expanded": !collapsedSections[section.label],
-              "aria-label": `${
-                collapsedSections[section.label] ? "Expand" : "Collapse"
-              } ${section.label}`,
-            },
-            h(Icon, { name: section.icon }),
-            h("span", null, section.label),
-            h(Icon, { name: "caret-down", className: "category-caret" }),
-          ),
-          !collapsedSections[section.label]
-            ? section.conversations.length
-              ? h(
-                  "div",
-                  { className: "conversation-category-list" },
-                  section.conversations.map(conversationRow),
-                )
-              : h(
-                  "p",
-                  { className: "conversation-category-empty" },
-                  normalizedQuery
-                    ? `No matching ${section.label.toLocaleLowerCase()}.`
-                    : section.label === "Research"
-                      ? "No research yet."
-                      : "No chats yet.",
-                )
-            : null,
+          h(Icon, { name: "chat-circle" }),
+          h("span", null, "Chats and researches"),
+          h(Icon, { name: "caret-down", className: "category-caret" }),
         ),
+        !conversationsCollapsed
+          ? visibleConversations.length
+            ? h(
+                "div",
+                { className: "conversation-category-list" },
+                visibleConversations.map(conversationRow),
+              )
+            : h(
+                "p",
+                { className: "conversation-category-empty" },
+                normalizedQuery
+                  ? "No matching conversations."
+                  : "No conversations yet.",
+              )
+          : null,
       ),
     ),
     h(
@@ -561,15 +558,61 @@ function SuggestionList({ onSuggestion }) {
 }
 
 function ResearchProgress({ research, onResume }) {
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [allSourcesOpen, setAllSourcesOpen] = useState(false);
   if (!research) return null;
   const progress = Math.round((research.progress ?? 0) * 100);
   const canResume = ["failed", "cancelled"].includes(research.status);
   const sources = research.sources ?? [];
+  const citations = research.citations ?? [];
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  const citedSourceIds = new Set();
+  const citedSourceRows = [];
+  for (const citation of citations) {
+    if (citedSourceIds.has(citation.source_id)) continue;
+    citedSourceIds.add(citation.source_id);
+    const source = sourceById.get(citation.source_id);
+    citedSourceRows.push(
+      citation.kind === "file"
+        ? {
+            kind: "file",
+            source_id: citation.source_id,
+            title: citation.title,
+            verification_status:
+              citation.verification_status ?? "file_provided",
+          }
+        : {
+            kind: "web",
+            source_id: citation.source_id,
+            title: source?.title ?? citation.title,
+            url: source?.url ?? citation.url,
+            snippet: source?.snippet ?? "",
+          },
+    );
+  }
+  const allSourceRows = Array.from(
+    new Map(
+      [
+        ...sources.map((source) => ({
+          kind: "web",
+          source_id: source.id,
+          title: source.title,
+          url: source.url,
+          snippet: source.snippet,
+        })),
+        ...citedSourceRows,
+      ].map((source) => [source.source_id, source]),
+    ).values(),
+  );
   const stageIndex = researchStages.findIndex(
     (stage) => stage.status === research.status,
   );
   const currentStage = research.status === "queued" ? 0 : stageIndex;
   const completedAll = research.status === "completed";
+  const keySourceRows = (
+    citedSourceRows.length ? citedSourceRows : allSourceRows
+  ).slice(0, 6);
+  const visibleSourceRows = allSourcesOpen ? allSourceRows : keySourceRows;
   const active = !["completed", "failed", "cancelled"].includes(
     research.status,
   );
@@ -597,6 +640,67 @@ function ResearchProgress({ research, onResume }) {
     : research.budgetExceeded
       ? `Used extra search budget (${research.totalToolCalls ?? 0}/${research.maxTotalToolCalls}); no new searches will be started.`
       : null;
+  const qualityWarning = research.qualityWarning ?? null;
+  const retryAfterSeconds = Math.max(0, research.retryAfterSeconds ?? 0);
+  const recoveryNotice =
+    research.recoveryState === "rate_limited"
+      ? `Too many requests. Research will continue in ${retryAfterSeconds} seconds.`
+      : research.recoveryState === "retrying"
+        ? `Research is temporarily delayed. Retrying in ${retryAfterSeconds} seconds.`
+        : null;
+  const degradedNotice =
+    research.softDeadlineReached || (research.degradedReasons ?? []).length
+      ? "Research is continuing with partial evidence."
+      : null;
+  const progressNotice =
+    recoveryNotice ||
+    [budgetWarning, qualityWarning, degradedNotice].filter(Boolean).join(" ") ||
+    null;
+
+  function sourceRow(source) {
+    if (source.kind === "file") {
+      return h(
+        "div",
+        {
+          className: `research-source-row file ${source.verification_status}`,
+          key: source.source_id,
+          title:
+            source.verification_status === "corroborated"
+              ? "Claims from this file were corroborated by web evidence."
+              : source.verification_status === "conflict"
+                ? "At least one claim from this file conflicts with web evidence."
+                : "This file is user-provided and is not proof of factual accuracy.",
+          role: "listitem",
+        },
+        h("span", { className: "research-source-id" }, source.source_id),
+        h("span", { className: "research-source-title" }, source.title),
+        h(
+          "span",
+          { className: "research-source-status" },
+          source.verification_status === "corroborated"
+            ? "Verified"
+            : source.verification_status === "conflict"
+              ? "Conflict"
+              : "File",
+        ),
+      );
+    }
+    return h(
+      "a",
+      {
+        className: "research-source-row",
+        key: source.source_id,
+        href: source.url,
+        target: "_blank",
+        rel: "noreferrer noopener",
+        title: source.snippet || source.title,
+        role: "listitem",
+      },
+      h("span", { className: "research-source-id" }, source.source_id),
+      h("span", { className: "research-source-title" }, source.title),
+      h(Icon, { name: "arrow-square-out" }),
+    );
+  }
 
   return h(
     "section",
@@ -613,7 +717,7 @@ function ResearchProgress({ research, onResume }) {
         }),
         researchStatusLabels[research.status] ?? "Preparing research",
       ),
-      h("span", null, `OpenAI · ${progress}%`),
+      h("span", null, `${progress}%`),
     ),
     h(
       "div",
@@ -656,36 +760,93 @@ function ResearchProgress({ research, onResume }) {
         [roundSummary, taskSummary, toolSummary].filter(Boolean).join(" · ") ||
           "Preparing the Research Brief",
       ),
-      budgetWarning
-        ? h("span", { className: "research-budget-warning" }, budgetWarning)
+      progressNotice
+        ? h(
+            "span",
+            {
+              className: recoveryNotice
+                ? "research-recovery-notice"
+                : "research-budget-warning",
+            },
+            progressNotice,
+          )
         : active
           ? h("span", null, "This can take several minutes.")
           : null,
     ),
-    sources.length
+    allSourceRows.length
       ? h(
-          "div",
+          "section",
           { className: "research-sources" },
-          h("strong", null, `${sources.length} sources collected`),
           h(
-            "div",
-            { className: "research-source-list" },
-            sources.map((source) =>
-              h(
-                "a",
-                {
-                  key: source.id,
-                  href: source.url,
-                  target: "_blank",
-                  rel: "noreferrer noopener",
-                  title: source.snippet || source.title,
-                },
-                h("span", null, source.id),
-                source.title,
-                h(Icon, { name: "arrow-square-out" }),
-              ),
+            "button",
+            {
+              className: "research-sources-toggle",
+              type: "button",
+              onClick: () => {
+                if (sourcesOpen) setAllSourcesOpen(false);
+                setSourcesOpen((current) => !current);
+              },
+              "aria-expanded": sourcesOpen,
+            },
+            h(Icon, { name: "books" }),
+            h("span", { className: "research-sources-label" }, "Sources"),
+            h(
+              "span",
+              { className: "research-sources-count" },
+              allSourceRows.length,
             ),
+            h(Icon, {
+              name: "caret-down",
+              className: `research-sources-caret${sourcesOpen ? " open" : ""}`,
+            }),
           ),
+          sourcesOpen
+            ? h(
+                "div",
+                { className: "research-sources-panel" },
+                completedAll
+                  ? [
+                      h(
+                        "div",
+                        { className: "research-sources-toolbar" },
+                        h(
+                          "span",
+                          null,
+                          citedSourceRows.length
+                            ? "Cited in report"
+                            : "Selected sources",
+                        ),
+                        allSourceRows.length > keySourceRows.length
+                          ? h(
+                              "button",
+                              {
+                                className: "research-sources-view-all",
+                                type: "button",
+                                onClick: () =>
+                                  setAllSourcesOpen((current) => !current),
+                              },
+                              allSourcesOpen
+                                ? "Show key sources"
+                                : `View all ${allSourceRows.length} sources`,
+                            )
+                          : null,
+                      ),
+                      h(
+                        "div",
+                        { className: "research-source-list", role: "list" },
+                        visibleSourceRows.map(sourceRow),
+                      ),
+                    ]
+                  : h(
+                      "p",
+                      { className: "research-sources-note" },
+                      active
+                        ? `${allSourceRows.length} sources collected. Key sources will appear with the report.`
+                        : `${allSourceRows.length} sources collected.`,
+                    ),
+              )
+            : null,
         )
       : null,
     canResume
@@ -698,8 +859,8 @@ function ResearchProgress({ research, onResume }) {
           },
           h(Icon, { name: "arrow-clockwise" }),
           research.status === "cancelled"
-            ? "Restart as a new OpenAI task"
-            : "Resume OpenAI research",
+            ? "Restart as a new research task"
+            : "Resume research",
         )
       : null,
   );
@@ -777,7 +938,7 @@ function ModeSwitch({ mode, onModeChange }) {
   );
 }
 
-function AttachmentList({ attachments }) {
+function AttachmentList({ attachments, onRemove }) {
   if (!attachments.length) return null;
   return h(
     "div",
@@ -785,9 +946,23 @@ function AttachmentList({ attachments }) {
     attachments.map((file) =>
       h(
         "span",
-        { className: "attachment-chip", key: `${file.name}-${file.size}` },
+        {
+          className: `attachment-chip ${file.status ?? "ready"}`,
+          key: file.id ?? file.localId,
+        },
         h(Icon, { name: "file-text" }),
-        file.name,
+        h("span", null, file.name),
+        file.status === "uploading"
+          ? h("span", { className: "attachment-status" }, "Uploading…")
+          : h(
+              "button",
+              {
+                type: "button",
+                onClick: () => onRemove(file),
+                "aria-label": `Remove ${file.name}`,
+              },
+              h(Icon, { name: "x" }),
+            ),
       ),
     ),
   );
@@ -803,6 +978,8 @@ function Composer({
   onModeChange,
   attachments,
   onFiles,
+  onRemoveFile,
+  isUploading,
   onVoice,
 }) {
   function onKeyDown(event) {
@@ -815,7 +992,7 @@ function Composer({
   return h(
     "div",
     { className: "composer-wrap" },
-    h(AttachmentList, { attachments }),
+    h(AttachmentList, { attachments, onRemove: onRemoveFile }),
     h(
       "div",
       { className: "composer" },
@@ -842,10 +1019,16 @@ function Composer({
             "label",
             {
               className: "tool-button",
-              title: "Stage a file for the next phase",
+              title: "Attach a TXT or PDF file",
             },
             h(Icon, { name: "paperclip" }),
-            h("input", { type: "file", multiple: true, onChange: onFiles }),
+            h("input", {
+              type: "file",
+              accept: ".txt,.pdf,text/plain,application/pdf",
+              multiple: true,
+              disabled: isStreaming || isUploading,
+              onChange: onFiles,
+            }),
           ),
           h(
             "button",
@@ -878,7 +1061,7 @@ function Composer({
                   className: "send-button",
                   type: "button",
                   onClick: onSend,
-                  disabled: !value.trim(),
+                  disabled: !value.trim() || isUploading,
                   "aria-label": "Send message",
                 },
                 h(Icon, { name: "arrow-up" }),
@@ -1836,6 +2019,9 @@ function App({ authSession }) {
   const memoryReviewCount = memories.filter((memory) =>
     ["candidate", "conflict", "stale"].includes(memory.status),
   ).length;
+  const isUploading = attachments.some(
+    (attachment) => attachment.status === "uploading",
+  );
 
   function showRoute(view, nextMode = mode, { replace = false } = {}) {
     const hash = routeHash(view, nextMode);
@@ -1968,6 +2154,7 @@ function App({ authSession }) {
             );
             if (!researchResponse.ok) return baseMessage;
             const job = await researchResponse.json();
+            const retrySnapshot = researchRetrySnapshot(job);
             return {
               ...baseMessage,
               content: job.checkpoint.report || baseMessage.content,
@@ -1993,6 +2180,13 @@ function App({ authSession }) {
                   (job.budget?.max_tool_call_overrun ?? 0),
                 budgetExceeded: job.budget_exceeded,
                 hardBudgetReached: job.hard_budget_reached,
+                citationCoverage: job.citation_coverage,
+                webCitationCoverage: job.web_citation_coverage,
+                fileCorroborationCoverage: job.file_corroboration_coverage,
+                qualityWarning: job.quality_warning,
+                ...retrySnapshot,
+                softDeadlineReached: job.soft_deadline_reached,
+                degradedReasons: job.degraded_reasons ?? [],
               },
             };
           } catch {
@@ -2239,11 +2433,19 @@ function App({ authSession }) {
           hardMaxTotalToolCalls: event.hard_max_total_tool_calls,
           budgetExceeded: event.budget_exceeded,
           hardBudgetReached: event.hard_budget_reached,
+          citationCoverage: event.citation_coverage,
+          webCitationCoverage: event.web_citation_coverage,
+          fileCorroborationCoverage: event.file_corroboration_coverage,
+          qualityWarning: event.quality_warning,
+          recoveryState: event.recovery_state,
+          retryAfterSeconds: event.retry_after_seconds,
+          softDeadlineReached: event.soft_deadline_reached,
+          degradedReasons: event.degraded_reasons ?? [],
         },
       }));
       if (event.restarted) {
         setToast(
-          "Started a new OpenAI research task; the cancelled response was not reused.",
+          "Started a new research task; the cancelled response was not reused.",
         );
       }
     }
@@ -2265,6 +2467,14 @@ function App({ authSession }) {
           hardMaxTotalToolCalls: event.hard_max_total_tool_calls,
           budgetExceeded: event.budget_exceeded,
           hardBudgetReached: event.hard_budget_reached,
+          citationCoverage: event.citation_coverage,
+          webCitationCoverage: event.web_citation_coverage,
+          fileCorroborationCoverage: event.file_corroboration_coverage,
+          qualityWarning: event.quality_warning,
+          recoveryState: event.recovery_state,
+          retryAfterSeconds: event.retry_after_seconds,
+          softDeadlineReached: event.soft_deadline_reached,
+          degradedReasons: event.degraded_reasons ?? [],
         },
       }));
     }
@@ -2313,6 +2523,23 @@ function App({ authSession }) {
                 event.budget_exceeded ?? message.research.budgetExceeded,
               hardBudgetReached:
                 event.hard_budget_reached ?? message.research.hardBudgetReached,
+              citationCoverage:
+                event.citation_coverage ?? message.research.citationCoverage,
+              webCitationCoverage:
+                event.web_citation_coverage ??
+                message.research.webCitationCoverage,
+              fileCorroborationCoverage:
+                event.file_corroboration_coverage ??
+                message.research.fileCorroborationCoverage,
+              qualityWarning:
+                event.quality_warning ?? message.research.qualityWarning,
+              recoveryState: event.recovery_state,
+              retryAfterSeconds: event.retry_after_seconds,
+              softDeadlineReached:
+                event.soft_deadline_reached ??
+                message.research.softDeadlineReached,
+              degradedReasons:
+                event.degraded_reasons ?? message.research.degradedReasons,
             }
           : message.research,
       }));
@@ -2343,8 +2570,8 @@ function App({ authSession }) {
       }));
       setToast(
         event.retryable
-          ? "OpenAI research paused. Retry to recover or restart the task."
-          : "Check the OpenAI Research configuration before retrying.",
+          ? "Research paused. Retry to recover or restart the task."
+          : "Check the Research configuration before retrying.",
       );
     }
   }
@@ -2380,7 +2607,7 @@ function App({ authSession }) {
             : publicMessage,
         }));
         setToast(
-          "Connection interrupted. Reopen the conversation to restore the OpenAI research task.",
+          "Connection interrupted. Reopen the conversation to restore the research task.",
         );
       }
     } finally {
@@ -2393,7 +2620,7 @@ function App({ authSession }) {
 
   async function sendMessage() {
     const text = input.trim();
-    if (!text || isStreaming) return;
+    if (!text || isStreaming || isUploading) return;
 
     const isResearch = mode === "research";
     const userMessage = {
@@ -2419,15 +2646,16 @@ function App({ authSession }) {
     await runStreamingRequest({
       endpoint: isResearch ? "/api/research" : "/api/chat",
       body: isResearch
-        ? { conversation_id: conversationId, query: text }
+        ? {
+            conversation_id: conversationId,
+            query: text,
+            attachment_ids: attachments.map((file) => file.id),
+          }
         : {
             conversation_id: conversationId,
             message: text,
             mode,
-            attachments: attachments.map((file) => ({
-              name: file.name,
-              size: file.size,
-            })),
+            attachment_ids: attachments.map((file) => file.id),
           },
       assistantId,
     });
@@ -2476,18 +2704,88 @@ function App({ authSession }) {
     setIsStreaming(false);
     setToast(
       jobId
-        ? "Research stopped. Restarting will create a new OpenAI task."
+        ? "Research stopped. Restarting will create a new task."
         : "Generation stopped.",
     );
   }
 
-  function stageFiles(event) {
-    const files = [...event.target.files];
-    setAttachments(files);
-    if (files.length) {
-      setToast(
-        `${files.length} file${files.length > 1 ? "s" : ""} staged locally. Ingestion arrives in phase 2.`,
+  async function stageFiles(event) {
+    const selected = [...event.target.files];
+    event.target.value = "";
+    const availableSlots = Math.max(0, 5 - attachments.length);
+    const files = selected.slice(0, availableSlots);
+    if (!files.length) {
+      if (selected.length) setToast("Attach at most 5 files to one request.");
+      return;
+    }
+    const staged = files.map((file) => ({
+      localId: crypto.randomUUID(),
+      name: file.name,
+      size_bytes: file.size,
+      status: "uploading",
+      source: file,
+    }));
+    setAttachments((current) => [...current, ...staged]);
+    if (selected.length > files.length) {
+      setToast("Only the first available files were added; the limit is 5.");
+    }
+
+    await Promise.all(
+      staged.map(async (item) => {
+        try {
+          const headers = await authorizationHeaders({
+            "Content-Type": item.source.type || "application/octet-stream",
+          });
+          const response = await fetch(
+            `${API_BASE}/api/files?name=${encodeURIComponent(item.name)}`,
+            { method: "POST", headers, body: item.source },
+          );
+          const payload = await response.json().catch(() => null);
+          if (!response.ok) {
+            throw new Error(
+              payload?.error?.message || "The file could not be uploaded.",
+            );
+          }
+          setAttachments((current) =>
+            current.map((attachment) =>
+              attachment.localId === item.localId
+                ? { ...payload, localId: item.localId }
+                : attachment,
+            ),
+          );
+        } catch (error) {
+          setAttachments((current) =>
+            current.filter(
+              (attachment) => attachment.localId !== item.localId,
+            ),
+          );
+          setToast(error.message || "The file could not be uploaded.");
+        }
+      }),
+    );
+  }
+
+  async function removeAttachment(attachment) {
+    if (attachment.status === "uploading") return;
+    setAttachments((current) =>
+      current.filter((item) => item.localId !== attachment.localId),
+    );
+    if (!attachment.id) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/files/${attachment.id}`, {
+        method: "DELETE",
+        headers: await authorizationHeaders(),
+      });
+      if (!response.ok && response.status !== 404) {
+        throw new Error("The file could not be removed.");
+      }
+    } catch {
+      setAttachments((current) =>
+        current.some((item) => item.localId === attachment.localId)
+          ? current
+          : [...current, attachment],
       );
+      setToast("The attachment could not be removed. Try again.");
     }
   }
 
@@ -2501,7 +2799,9 @@ function App({ authSession }) {
     onModeChange: (nextMode) => showRoute("chat", nextMode),
     attachments,
     onFiles: stageFiles,
-    onVoice: () => setToast("Voice input is planned for phase 2."),
+    onRemoveFile: removeAttachment,
+    isUploading,
+    onVoice: () => setToast("Voice input is planned for a later phase."),
   };
 
   function selectSuggestion(prompt) {

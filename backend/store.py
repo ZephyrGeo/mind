@@ -173,6 +173,7 @@ class JsonConversationRepository:
         mode: AgentMode | str,
         *,
         user_id: str = LOCAL_USER_ID,
+        attachment_ids: list[uuid.UUID] | None = None,
     ) -> str:
         with self._lock:
             payload = self._read()
@@ -215,6 +216,10 @@ class JsonConversationRepository:
                         "conversation_id": requested_id,
                         "role": "user",
                         "content": user_message,
+                        "attachment_ids": [
+                            str(attachment_id)
+                            for attachment_id in (attachment_ids or [])
+                        ],
                         "created_at": now,
                     },
                     {
@@ -237,6 +242,7 @@ class JsonConversationRepository:
         mode: AgentMode | str,
         *,
         user_id: str = LOCAL_USER_ID,
+        attachment_ids: list[uuid.UUID] | None = None,
     ) -> str:
         with self._lock:
             payload = self._read()
@@ -278,6 +284,10 @@ class JsonConversationRepository:
                     "conversation_id": requested_id,
                     "role": "user",
                     "content": content,
+                    "attachment_ids": [
+                        str(attachment_id)
+                        for attachment_id in (attachment_ids or [])
+                    ],
                     "created_at": now,
                 }
             )

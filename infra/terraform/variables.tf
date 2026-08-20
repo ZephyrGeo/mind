@@ -45,6 +45,12 @@ variable "manage_firestore_database" {
   default     = false
 }
 
+variable "file_storage_bucket" {
+  description = "Private bucket for user-uploaded TXT and PDF originals."
+  type        = string
+  default     = ""
+}
+
 variable "min_instances" {
   description = "Minimum Cloud Run instances; staging scales to zero."
   type        = number

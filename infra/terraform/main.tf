@@ -7,6 +7,7 @@ locals {
     "identitytoolkit.googleapis.com",
     "run.googleapis.com",
     "secretmanager.googleapis.com",
+    "storage.googleapis.com",
   ])
 }
 
@@ -61,6 +62,27 @@ resource "google_project_iam_member" "build_role" {
   project = var.project_id
   role    = "roles/run.builder"
   member  = "serviceAccount:${google_service_account.build.email}"
+}
+
+resource "google_storage_bucket" "files" {
+  project                     = var.project_id
+  name                        = var.file_storage_bucket != "" ? var.file_storage_bucket : "${var.project_id}-mind-files"
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = false
+
+  soft_delete_policy {
+    retention_duration_seconds = 0
+  }
+
+  depends_on = [google_project_service.required]
+}
+
+resource "google_storage_bucket_iam_member" "api_files" {
+  bucket = google_storage_bucket.files.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.api.email}"
 }
 
 resource "google_secret_manager_secret" "openai" {
@@ -196,6 +218,34 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "MIND_FIRESTORE_DATABASE_ID"
         value = "(default)"
       }
+      env {
+        name  = "MIND_FILE_STORAGE_PROVIDER"
+        value = "gcs"
+      }
+      env {
+        name  = "MIND_FILE_STORAGE_BUCKET"
+        value = google_storage_bucket.files.name
+      }
+      env {
+        name  = "MIND_MAX_FILE_BYTES"
+        value = "20000000"
+      }
+      env {
+        name  = "MIND_MAX_FILE_PAGES"
+        value = "200"
+      }
+      env {
+        name  = "MIND_MAX_EXTRACTED_FILE_CHARACTERS"
+        value = "120000"
+      }
+      env {
+        name  = "MIND_MAX_FILE_CONTEXT_CHARACTERS"
+        value = "24000"
+      }
+      env {
+        name  = "MIND_MAX_FILES_PER_REQUEST"
+        value = "5"
+      }
 
       env {
         name  = "MIND_MEMORY_RETRIEVAL_LIMIT"
@@ -291,6 +341,34 @@ resource "google_cloud_run_v2_service" "api" {
         value = "600"
       }
       env {
+        name  = "MIND_RESEARCH_SOFT_TIMEOUT_SECONDS"
+        value = "420"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_CONCURRENT_SEARCHES"
+        value = "2"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_TRANSPORT_RETRIES"
+        value = "5"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_RATE_LIMIT_RETRIES"
+        value = "3"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_STAGE_ATTEMPTS"
+        value = "2"
+      }
+      env {
+        name  = "MIND_RESEARCH_RETRY_BASE_SECONDS"
+        value = "2"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_EVIDENCE_CHARACTERS"
+        value = "60000"
+      }
+      env {
         name = "OPENAI_API_KEY"
         value_source {
           secret_key_ref {
@@ -326,6 +404,7 @@ resource "google_cloud_run_v2_service" "api" {
     google_project_iam_member.api_roles,
     google_secret_manager_secret.deepseek,
     google_secret_manager_secret.openai,
+    google_storage_bucket_iam_member.api_files,
   ]
 }
 

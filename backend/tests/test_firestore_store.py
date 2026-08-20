@@ -6,12 +6,22 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.firestore_store import (
+    FirestoreAttachmentRepository,
     FirestoreConversationRepository,
     FirestoreMemoryRepository,
     FirestoreResearchRepository,
 )
+from backend.file_store import AttachmentNotFoundError
 from backend.memory_store import MemoryNotFoundError
-from backend.models import AgentMode, Memory, MemoryStatus, ResearchJob, ResearchStatus
+from backend.models import (
+    AgentMode,
+    Attachment,
+    AttachmentStatus,
+    Memory,
+    MemoryStatus,
+    ResearchJob,
+    ResearchStatus,
+)
 from backend.research_store import ResearchJobNotFoundError
 from backend.store import ConversationNotFoundError
 
@@ -191,6 +201,11 @@ class FirestoreRepositoryTest(unittest.TestCase):
             client=self.client,
             transactional=fake_transactional,
         )
+        self.attachments = FirestoreAttachmentRepository(
+            project_id="demo-mind-local",
+            client=self.client,
+            transactional=fake_transactional,
+        )
 
     def test_conversations_are_ordered_tenant_scoped_and_idempotent(self) -> None:
         conversation_id = self.conversations.append_exchange(
@@ -247,6 +262,31 @@ class FirestoreRepositoryTest(unittest.TestCase):
 
         self.conversations.delete_for_user("owner")
         self.assertEqual(self.conversations.list_conversations("owner"), [])
+
+    def test_attachments_are_tenant_scoped_and_deletable(self) -> None:
+        attachment = Attachment(
+            user_id="owner",
+            name="brief.txt",
+            media_type="text/plain",
+            size_bytes=12,
+            storage_uri="gs://mind-files/users/owner/id/brief.txt",
+            status=AttachmentStatus.READY,
+            extracted_text="Private brief",
+            extracted_character_count=13,
+        )
+        self.attachments.create_attachment(attachment)
+        self.assertEqual(self.attachments.list_attachments("owner"), [attachment])
+        with self.assertRaises(AttachmentNotFoundError):
+            self.attachments.get_attachment(attachment.id, "stranger")
+
+        updated = attachment.model_copy(update={"conversation_id": uuid.uuid4()})
+        self.attachments.save_attachment(updated, "owner")
+        self.assertEqual(
+            self.attachments.get_attachment(attachment.id, "owner").conversation_id,
+            updated.conversation_id,
+        )
+        self.attachments.delete_for_user("owner")
+        self.assertEqual(self.attachments.list_attachments("owner"), [])
 
     def test_research_jobs_preserve_cancellation_and_tenant_boundaries(self) -> None:
         conversation_id = uuid.uuid4()

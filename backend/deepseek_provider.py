@@ -75,17 +75,17 @@ class DeepSeekProvider:
         *,
         history: Sequence[ModelMessage] = (),
         memory_context: str = "",
+        file_context: str = "",
     ) -> Iterator[str]:
         normalized_mode = AgentMode(mode)
         thinking_enabled = normalized_mode == AgentMode.RESEARCH
         base_system_prompt = (
             RESEARCH_SYSTEM_PROMPT if thinking_enabled else CHAT_SYSTEM_PROMPT
         )
-        system_prompt = (
-            f"{base_system_prompt}\n\n{memory_context}"
-            if memory_context
-            else base_system_prompt
-        )
+        context_sections = [
+            context for context in (memory_context, file_context) if context
+        ]
+        system_prompt = "\n\n".join([base_system_prompt, *context_sections])
         request_body = {
             "model": self.model,
             "messages": [

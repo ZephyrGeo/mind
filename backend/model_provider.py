@@ -21,6 +21,7 @@ class ModelProvider(Protocol):
         *,
         history: Sequence[ModelMessage] = (),
         memory_context: str = "",
+        file_context: str = "",
     ) -> Iterator[str]:
         """Yield ordered text deltas for a single assistant response."""
 

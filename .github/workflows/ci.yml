@@ -54,6 +54,13 @@ jobs:
           backend/models.py
           backend/repositories.py
           backend/research_repositories.py
+          backend/file_store.py
+          backend/file_storage.py
+          backend/file_service.py
+          backend/research_provider.py
+          backend/openai_research_provider.py
+          backend/research_resilience.py
+          backend/research_service.py
 
       - name: Build and test without model calls
         env:

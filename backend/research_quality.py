@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from .models import ResearchCitation, ResearchSource
+from .models import ResearchCitation, ResearchCitationKind, ResearchSource
 from .source_urls import canonical_source_url
 
 
@@ -29,6 +29,9 @@ class ResearchQualityMetrics:
     duplicate_source_count: int
     authoritative_source_ratio: float
     citation_coverage: float
+    web_citation_coverage: float
+    file_corroboration_coverage: float
+    unverified_file_claim_count: int
     conflict_count: int
     conflict_detection_rate: float
     factual_correctness: float
@@ -60,11 +63,31 @@ def evaluate_research_quality(
     source_ratio = authoritative_count / source_count if source_count else 0.0
 
     claim_ranges = _claim_ranges(report)
-    cited_claims = sum(
-        _claim_is_cited(report, start, end, citations)
+    claim_citations = [
+        _citations_for_claim(start, end, citations)
         for start, end in claim_ranges
+    ]
+    cited_claims = sum(bool(items) for items in claim_citations)
+    web_cited_claims = sum(
+        any(item.kind == ResearchCitationKind.WEB for item in items)
+        for items in claim_citations
+    )
+    file_claims = [
+        items
+        for items in claim_citations
+        if any(item.kind == ResearchCitationKind.FILE for item in items)
+    ]
+    corroborated_file_claims = sum(
+        any(item.kind == ResearchCitationKind.WEB for item in items)
+        for items in file_claims
     )
     citation_coverage = cited_claims / len(claim_ranges) if claim_ranges else 1.0
+    web_citation_coverage = (
+        web_cited_claims / len(claim_ranges) if claim_ranges else 1.0
+    )
+    file_corroboration_coverage = (
+        corroborated_file_claims / len(file_claims) if file_claims else 1.0
+    )
 
     actual_conflicts = detected_conflicts or []
     conflict_targets = expected_conflicts or []
@@ -79,6 +102,9 @@ def evaluate_research_quality(
         duplicate_source_count=len(canonical_sources) - source_count,
         authoritative_source_ratio=round(source_ratio, 4),
         citation_coverage=round(citation_coverage, 4),
+        web_citation_coverage=round(web_citation_coverage, 4),
+        file_corroboration_coverage=round(file_corroboration_coverage, 4),
+        unverified_file_claim_count=len(file_claims) - corroborated_file_claims,
         conflict_count=len(actual_conflicts),
         conflict_detection_rate=round(conflict_detection_rate, 4),
         factual_correctness=round(factual_correctness, 4),
@@ -163,7 +189,7 @@ def _sentence_ranges(value: str) -> list[tuple[int, int]]:
 
         end = index + 1
         while True:
-            marker = re.match(r"[ \t]*\[S\d+\]", value[end:])
+            marker = re.match(r"[ \t]*\[(?:S|F)\d+\]", value[end:])
             if marker is None:
                 break
             end += marker.end()
@@ -182,7 +208,7 @@ def _source_entry(value: str) -> bool:
     normalized = value.casefold()
     return (
         normalized.startswith(("sources", "source:", "来源", "参考来源"))
-        or bool(re.fullmatch(r"\[S\d+\][\s:—-]+.*", value))
+        or bool(re.fullmatch(r"\[(?:S|F)\d+\][\s:—-]+.*", value))
         or bool(re.fullmatch(r"https?://\S+", value))
     )
 
@@ -198,18 +224,16 @@ def _explicit_engineering_judgment(value: str) -> bool:
     )
 
 
-def _claim_is_cited(
-    report: str,
+def _citations_for_claim(
     start: int,
     end: int,
     citations: list[ResearchCitation],
-) -> bool:
-    if re.search(r"\[S\d+\]", report[start:end]):
-        return True
-    return any(
-        citation.start_index < end and citation.end_index > start
+) -> list[ResearchCitation]:
+    return [
+        citation
         for citation in citations
-    )
+        if citation.start_index < end and citation.end_index > start
+    ]
 
 
 def _is_authoritative(url: str, authoritative_domains: frozenset[str]) -> bool:

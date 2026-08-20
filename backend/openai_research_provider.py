@@ -5,6 +5,8 @@ from __future__ import annotations
 import ipaddress
 import json
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -196,7 +198,7 @@ class OpenAIResearchProvider:
         if not self.configured:
             raise ResearchProviderError(
                 "research_not_configured",
-                "OpenAI Research is not configured. Add OPENAI_API_KEY on the server.",
+                "Research is not configured. Check the server settings.",
                 retryable=False,
             )
         encoded = (
@@ -220,11 +222,11 @@ class OpenAIResearchProvider:
         try:
             response = self._opener(request, timeout=self.timeout_seconds)
         except HTTPError as error:
-            raise _http_error(error.code) from None
+            raise _http_error(error, path=path) from None
         except (TimeoutError, URLError, OSError):
             raise ResearchProviderError(
                 "research_provider_unavailable",
-                "OpenAI Research is temporarily unavailable. Please try again.",
+                "Research is temporarily unavailable. Please try again.",
                 retryable=True,
             ) from None
 
@@ -234,7 +236,7 @@ class OpenAIResearchProvider:
         except (TimeoutError, URLError, OSError):
             raise ResearchProviderError(
                 "research_provider_unavailable",
-                "OpenAI Research is temporarily unavailable. Please try again.",
+                "Research is temporarily unavailable. Please try again.",
                 retryable=True,
             ) from None
         if len(encoded_response) > self.max_response_bytes:
@@ -318,13 +320,13 @@ def _response_failure(
         details_payload = _object_mapping(details)
         reason = details_payload.get("reason") if details_payload else None
         code = f"research_incomplete_{reason}" if isinstance(reason, str) else "research_incomplete"
-        return code, "OpenAI Research ended before producing a complete report.", True
+        return code, "Research ended before producing a complete report.", True
     code = (
         f"research_provider_{provider_code}"
         if isinstance(provider_code, str) and provider_code
         else "research_provider_failed"
     )
-    return code, "OpenAI Research could not complete the report.", True
+    return code, "Research could not complete the report.", True
 
 
 def _object_mapping(value: object) -> Mapping[str, object] | None:
@@ -352,35 +354,125 @@ def _is_public_web_url(value: str) -> bool:
     return address.is_global
 
 
-def _http_error(status_code: int) -> ResearchProviderError:
+def _http_error(error: HTTPError, *, path: str) -> ResearchProviderError:
+    status_code = error.code
+    provider_code = _http_provider_code(error)
+    retry_after_seconds = _retry_after_seconds(error)
     if status_code in {401, 403}:
         return ResearchProviderError(
             "research_authentication_failed",
-            "OpenAI authentication failed. Check OPENAI_API_KEY on the server.",
+            "Research authentication failed. Check the server configuration.",
             retryable=False,
+            provider_status_code=status_code,
         )
     if status_code == 404:
+        if path == "/responses":
+            return ResearchProviderError(
+                "research_model_not_found",
+                "The configured Research model is unavailable.",
+                retryable=False,
+                provider_status_code=status_code,
+            )
         return ResearchProviderError(
             "research_response_not_found",
-            "The OpenAI research response is no longer available. Restart the research task.",
+            "The saved Research response is no longer available. Restart the task.",
             retryable=False,
+            provider_status_code=status_code,
         )
     if status_code == 429:
+        if provider_code in {"insufficient_quota", "billing_hard_limit_reached"}:
+            return ResearchProviderError(
+                "research_quota_exhausted",
+                "Research usage is unavailable because the configured quota is exhausted.",
+                retryable=False,
+                provider_status_code=status_code,
+            )
         return ResearchProviderError(
             "research_rate_limited",
-            "OpenAI Research is receiving too many requests. Please retry shortly.",
+            "Too many requests. Research will continue shortly.",
             retryable=True,
+            retry_after_seconds=retry_after_seconds,
+            provider_status_code=status_code,
+        )
+    if provider_code in {
+        "context_length_exceeded",
+        "context_window_exceeded",
+        "max_context_length_exceeded",
+    }:
+        return ResearchProviderError(
+            "research_context_limit",
+            "Research needs to reduce its working context before continuing.",
+            retryable=True,
+            provider_status_code=status_code,
+        )
+    if status_code == 408 or provider_code in {
+        "deadline_exceeded",
+        "request_timeout",
+        "timeout",
+    }:
+        return ResearchProviderError(
+            "research_provider_timeout",
+            "Research is temporarily delayed and will retry safely.",
+            retryable=True,
+            retry_after_seconds=retry_after_seconds,
+            provider_status_code=status_code,
+        )
+    if status_code in {400, 402, 422}:
+        return ResearchProviderError(
+            "research_request_rejected",
+            "The Research request was rejected and needs attention.",
+            retryable=False,
+            provider_status_code=status_code,
         )
     return ResearchProviderError(
         "research_request_failed",
-        "OpenAI Research could not complete the request.",
+        "Research could not complete the request.",
         retryable=status_code >= 500,
+        retry_after_seconds=retry_after_seconds,
+        provider_status_code=status_code,
     )
+
+
+def _http_provider_code(error: HTTPError) -> str | None:
+    try:
+        encoded = error.read(65_537)
+    except (OSError, ValueError):
+        return None
+    if len(encoded) > 65_536:
+        return None
+    try:
+        payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    typed_payload = cast(Mapping[str, object], payload)
+    error_payload = _object_mapping(typed_payload.get("error"))
+    if error_payload is None:
+        return None
+    code = error_payload.get("code") or error_payload.get("type")
+    return code if isinstance(code, str) and code else None
+
+
+def _retry_after_seconds(error: HTTPError) -> float | None:
+    value = error.headers.get("Retry-After") if error.headers else None
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
 
 
 def _invalid_response_error() -> ResearchProviderError:
     return ResearchProviderError(
         "research_invalid_response",
-        "OpenAI Research returned an invalid response. Please try again.",
+        "Research returned an invalid response. Please try again.",
         retryable=True,
     )

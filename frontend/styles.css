@@ -960,11 +960,6 @@ select:focus-visible {
   gap: 8px;
 }
 
-.conversation-category + .conversation-category {
-  border-top: 1px solid var(--line);
-  padding-top: 16px;
-}
-
 .conversation-category-label {
   align-items: center;
   background: var(--sidebar);
@@ -1528,13 +1523,36 @@ select:focus-visible {
   border-radius: 999px;
   color: #5f5f5f;
   display: inline-flex;
-  font-size: 10px;
+  font-size: 12px;
   gap: 6px;
   max-width: 250px;
-  overflow: hidden;
   padding: 6px 10px;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.attachment-chip > span:first-of-type {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attachment-chip.uploading {
+  color: var(--muted);
+}
+
+.attachment-status {
+  font-size: 11px;
+}
+
+.attachment-chip button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  justify-content: center;
+  padding: 0;
 }
 
 .workspace.has-messages {
@@ -1590,6 +1608,7 @@ select:focus-visible {
   color: #2f2f2f;
   font-size: 16px;
   line-height: 1.75;
+  min-width: 0;
 }
 
 .markdown-content {
@@ -1716,6 +1735,7 @@ select:focus-visible {
   display: grid;
   gap: 12px;
   margin-top: 12px;
+  min-width: 0;
   padding: 14px;
 }
 
@@ -1820,50 +1840,160 @@ select:focus-visible {
   font-weight: 650;
 }
 
-.research-sources {
-  border-top: 1px solid #e5e5e5;
-  display: grid;
-  gap: 8px;
-  padding-top: 11px;
-}
-
-.research-sources > strong {
-  color: #737373;
-  font-size: 10px;
+.research-recovery-notice {
+  color: #555555;
   font-weight: 650;
 }
 
-.research-source-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.research-sources {
+  border-top: 1px solid #e5e5e5;
+  min-width: 0;
+  padding-top: 4px;
 }
 
-.research-source-list a {
+.research-sources-toggle {
   align-items: center;
-  background: white;
-  border: 1px solid #dddddd;
+  background: transparent;
+  border: 0;
+  color: #5f5f5f;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px 2px;
+  text-align: left;
+  width: 100%;
+}
+
+.research-sources-toggle:hover {
+  color: #202020;
+}
+
+.research-sources-label {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.research-sources-count {
+  background: #e9e9e9;
   border-radius: 999px;
+  color: #666666;
+  font-size: 9px;
+  line-height: 1;
+  min-width: 20px;
+  padding: 3px 6px;
+  text-align: center;
+}
+
+.research-sources-caret {
+  margin-left: auto;
+  transition: transform 160ms ease;
+}
+
+.research-sources-caret.open {
+  transform: rotate(180deg);
+}
+
+.research-sources-panel {
+  border-top: 1px solid #ededed;
+  min-width: 0;
+}
+
+.research-sources-toolbar {
+  align-items: center;
+  color: #737373;
+  display: flex;
+  font-size: 9px;
+  font-weight: 650;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 8px 6px 4px;
+}
+
+.research-sources-view-all {
+  background: transparent;
+  border: 0;
   color: #555555;
-  display: inline-flex;
+  cursor: pointer;
+  font: inherit;
+  padding: 2px 0;
+}
+
+.research-sources-view-all:hover {
+  color: #111111;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.research-sources-note {
+  color: #777777;
   font-size: 10px;
-  gap: 5px;
-  max-width: min(100%, 330px);
-  overflow: hidden;
-  padding: 6px 9px;
+  margin: 0;
+  padding: 9px 6px 6px;
+}
+
+.research-source-list {
+  display: grid;
+  max-height: 260px;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.research-source-row {
+  align-items: center;
+  border-radius: 8px;
+  color: #4f4f4f;
+  display: grid;
+  font-size: 10px;
+  gap: 8px;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 8px 6px;
   text-decoration: none;
+  width: 100%;
+}
+
+.research-source-row:hover {
+  background: #f1f1f1;
+  color: #202020;
+}
+
+.research-source-id {
+  color: #175cd3;
+  font-weight: 700;
+}
+
+.research-source-title {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.research-source-list a:hover {
-  border-color: #bdbdbd;
-  color: #175cd3;
+.research-source-row > i {
+  color: #858585;
 }
 
-.research-source-list a > span {
-  color: #175cd3;
-  font-weight: 700;
+.research-source-row.file {
+  cursor: default;
+}
+
+.research-source-status {
+  color: #777777;
+  font-size: 9px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.research-source-row.file.corroborated .research-source-status {
+  color: #267348;
+}
+
+.research-source-row.file.conflict .research-source-status {
+  color: #b13a29;
 }
 
 .research-resume {

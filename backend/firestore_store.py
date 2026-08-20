@@ -10,8 +10,10 @@ from uuid import UUID
 
 from .memory_embedding import coerce_float_list, cosine_similarity
 from .memory_store import MemoryNotFoundError
+from .file_store import AttachmentNotFoundError
 from .models import (
     AgentMode,
+    Attachment,
     Conversation,
     ConversationSummary,
     Memory,
@@ -153,6 +155,7 @@ class FirestoreConversationRepository(_FirestoreRepository):
         content: str,
         now: datetime,
         sequence: int,
+        attachment_ids: list[UUID] | None = None,
         research_job_id: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -162,6 +165,9 @@ class FirestoreConversationRepository(_FirestoreRepository):
             "content": content,
             "created_at": now.isoformat(),
             "sequence": sequence,
+            "attachment_ids": [
+                str(attachment_id) for attachment_id in (attachment_ids or [])
+            ],
         }
         if research_job_id is not None:
             payload["research_job_id"] = research_job_id
@@ -247,6 +253,7 @@ class FirestoreConversationRepository(_FirestoreRepository):
         mode: AgentMode | str,
         *,
         user_id: str,
+        attachment_ids: list[UUID] | None = None,
     ) -> str:
         requested_id = str(conversation_id or uuid.uuid4())
         reference = self._conversation(user_id, requested_id)
@@ -289,6 +296,7 @@ class FirestoreConversationRepository(_FirestoreRepository):
                     content=user_message,
                     now=now,
                     sequence=message_count,
+                    attachment_ids=attachment_ids,
                 ),
             )
             transaction.set(
@@ -321,6 +329,7 @@ class FirestoreConversationRepository(_FirestoreRepository):
         mode: AgentMode | str,
         *,
         user_id: str,
+        attachment_ids: list[UUID] | None = None,
     ) -> str:
         requested_id = str(conversation_id or uuid.uuid4())
         reference = self._conversation(user_id, requested_id)
@@ -361,6 +370,7 @@ class FirestoreConversationRepository(_FirestoreRepository):
                     content=content,
                     now=now,
                     sequence=message_count,
+                    attachment_ids=attachment_ids,
                 ),
             )
             transaction.set(
@@ -646,6 +656,84 @@ class FirestoreMemoryRepository(_FirestoreRepository):
 
     def delete_for_user(self, user_id: str) -> None:
         self._delete_collection(self._memories(user_id))
+
+
+class FirestoreAttachmentRepository(_FirestoreRepository):
+    """Persist private attachment metadata below one authenticated user."""
+
+    def _attachments(self, user_id: str) -> Any:
+        return self._user(user_id).collection("attachments")
+
+    def _attachment(self, user_id: str, attachment_id: UUID | str) -> Any:
+        return self._attachments(user_id).document(str(attachment_id))
+
+    def list_attachments(self, user_id: str) -> list[Attachment]:
+        query = self._attachments(user_id).order_by(
+            "updated_at",
+            direction=self._descending,
+        )
+        return [
+            Attachment.model_validate(snapshot.to_dict())
+            for snapshot in query.stream()
+            if (snapshot.to_dict() or {}).get("user_id") == user_id
+        ]
+
+    def get_attachment(
+        self,
+        attachment_id: UUID | str,
+        user_id: str,
+    ) -> Attachment:
+        snapshot = self._attachment(user_id, attachment_id).get()
+        payload = self._require_owned_document(
+            snapshot,
+            user_id=user_id,
+            error=AttachmentNotFoundError,
+            message="Attachment does not exist for this user.",
+        )
+        return Attachment.model_validate(payload)
+
+    def create_attachment(self, attachment: Attachment) -> Attachment:
+        reference = self._attachment(attachment.user_id, attachment.id)
+
+        def operation(transaction: Any) -> Attachment:
+            if reference.get(transaction=transaction).exists:
+                raise ValueError("Attachment already exists.")
+            transaction.set(reference, _json_document(attachment))
+            return attachment
+
+        return self._run_transaction(operation)
+
+    def save_attachment(self, attachment: Attachment, user_id: str) -> Attachment:
+        if attachment.user_id != user_id:
+            raise AttachmentNotFoundError(
+                "Attachment does not exist for this user."
+            )
+        reference = self._attachment(user_id, attachment.id)
+
+        def operation(transaction: Any) -> Attachment:
+            self._require_owned_document(
+                reference.get(transaction=transaction),
+                user_id=user_id,
+                error=AttachmentNotFoundError,
+                message="Attachment does not exist for this user.",
+            )
+            transaction.set(reference, _json_document(attachment))
+            return attachment
+
+        return self._run_transaction(operation)
+
+    def delete_attachment(self, attachment_id: UUID | str, user_id: str) -> None:
+        reference = self._attachment(user_id, attachment_id)
+        self._require_owned_document(
+            reference.get(),
+            user_id=user_id,
+            error=AttachmentNotFoundError,
+            message="Attachment does not exist for this user.",
+        )
+        reference.delete()
+
+    def delete_for_user(self, user_id: str) -> None:
+        self._delete_collection(self._attachments(user_id))
 
 
 class FirestoreResearchRepository(_FirestoreRepository):
