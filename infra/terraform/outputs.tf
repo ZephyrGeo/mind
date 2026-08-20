@@ -13,3 +13,7 @@ output "build_service_account" {
 output "api_url" {
   value = try(google_cloud_run_v2_service.api[0].uri, null)
 }
+
+output "file_storage_bucket" {
+  value = google_storage_bucket.files.name
+}

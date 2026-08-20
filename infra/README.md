@@ -1,8 +1,8 @@
 # Mind staging infrastructure
 
 This Terraform root establishes the reproducible Google Cloud foundation for
-Mind staging: required APIs, an Artifact Registry repository, a least-privilege
-Cloud Run service account with Firestore and Firebase Authentication access,
+Mind staging: required APIs, an Artifact Registry repository, a private file
+bucket, a least-privilege Cloud Run service account with Firestore, Storage, and Firebase Authentication access,
 Secret Manager containers, and an optional Cloud Run
 API service. Firebase Hosting assets and Firestore rules are deployed with the
 Firebase CLI from the repository root.
@@ -49,3 +49,6 @@ firebase deploy --project mind-staging-ce427 --only hosting,firestore
 
 Terraform state may contain infrastructure metadata and must use a protected
 remote backend before a second operator or production environment is added.
+The file bucket enforces uniform bucket-level access and public access
+prevention. Soft delete is disabled so an approved account deletion removes
+originals rather than retaining a recoverable copy. Uploads remain API-only.

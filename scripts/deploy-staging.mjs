@@ -8,6 +8,8 @@ const root = path.resolve(import.meta.dirname, "..");
 const projectId = process.env.MIND_FIREBASE_PROJECT_ID ?? "mind-staging-ce427";
 const region = process.env.MIND_GCP_REGION ?? "asia-northeast1";
 const serviceName = process.env.MIND_CLOUD_RUN_SERVICE ?? "mind-api-staging";
+const fileBucket =
+  process.env.MIND_FILE_STORAGE_BUCKET ?? `${projectId}-mind-files`;
 const serviceAccountName = "mind-api-staging";
 const serviceAccount = `${serviceAccountName}@${projectId}.iam.gserviceaccount.com`;
 const buildServiceAccountName = "mind-build-staging";
@@ -208,6 +210,47 @@ function ensureMemoryVectorIndex() {
   );
 }
 
+function ensureFileBucket() {
+  const bucketUri = `gs://${fileBucket}`;
+  if (!succeeds(gcloud, ["storage", "buckets", "describe", bucketUri])) {
+    run(gcloud, [
+      "storage",
+      "buckets",
+      "create",
+      bucketUri,
+      "--project",
+      projectId,
+      "--location",
+      region,
+      "--uniform-bucket-level-access",
+      "--public-access-prevention",
+      "--soft-delete-duration=0",
+      "--quiet",
+    ]);
+  }
+  run(gcloud, [
+    "storage",
+    "buckets",
+    "update",
+    bucketUri,
+    "--uniform-bucket-level-access",
+    "--public-access-prevention",
+    "--soft-delete-duration=0",
+    "--quiet",
+  ]);
+  run(gcloud, [
+    "storage",
+    "buckets",
+    "add-iam-policy-binding",
+    bucketUri,
+    "--member",
+    `serviceAccount:${serviceAccount}`,
+    "--role",
+    "roles/storage.objectAdmin",
+    "--quiet",
+  ]);
+}
+
 const openaiApiKey = requireValue("OPENAI_API_KEY");
 const deepseekApiKey = requireValue("DEEPSEEK_API_KEY");
 const allowedEmails = requireValue("MIND_ALLOWED_USER_EMAILS");
@@ -228,6 +271,7 @@ run(gcloud, [
   "identitytoolkit.googleapis.com",
   "run.googleapis.com",
   "secretmanager.googleapis.com",
+  "storage.googleapis.com",
   "--project",
   projectId,
   "--quiet",
@@ -268,6 +312,7 @@ ensureServiceAccount(
   buildServiceAccount,
   "Mind staging image builder",
 );
+ensureFileBucket();
 
 for (const role of [
   "roles/datastore.user",
@@ -323,6 +368,13 @@ const envFlag = gcloudDictionary([
   "MIND_FIREBASE_CHECK_REVOKED=1",
   "MIND_PERSISTENCE_PROVIDER=firestore",
   "MIND_FIRESTORE_DATABASE_ID=(default)",
+  "MIND_FILE_STORAGE_PROVIDER=gcs",
+  `MIND_FILE_STORAGE_BUCKET=${fileBucket}`,
+  `MIND_MAX_FILE_BYTES=${process.env.MIND_MAX_FILE_BYTES ?? "20000000"}`,
+  `MIND_MAX_FILE_PAGES=${process.env.MIND_MAX_FILE_PAGES ?? "200"}`,
+  `MIND_MAX_EXTRACTED_FILE_CHARACTERS=${process.env.MIND_MAX_EXTRACTED_FILE_CHARACTERS ?? "120000"}`,
+  `MIND_MAX_FILE_CONTEXT_CHARACTERS=${process.env.MIND_MAX_FILE_CONTEXT_CHARACTERS ?? "24000"}`,
+  `MIND_MAX_FILES_PER_REQUEST=${process.env.MIND_MAX_FILES_PER_REQUEST ?? "5"}`,
   `MIND_MEMORY_RETRIEVAL_LIMIT=${process.env.MIND_MEMORY_RETRIEVAL_LIMIT ?? "5"}`,
   `MIND_MEMORY_MAX_CONTEXT_CHARACTERS=${process.env.MIND_MEMORY_MAX_CONTEXT_CHARACTERS ?? "4000"}`,
   "MIND_MEMORY_PROVIDER=openai",
@@ -346,7 +398,14 @@ const envFlag = gcloudDictionary([
   `MIND_RESEARCH_TOOL_CALL_OVERRUN_RATIO=${process.env.MIND_RESEARCH_TOOL_CALL_OVERRUN_RATIO ?? "0.15"}`,
   `MIND_RESEARCH_MAX_TOOL_CALL_OVERRUN=${process.env.MIND_RESEARCH_MAX_TOOL_CALL_OVERRUN ?? "3"}`,
   `MIND_RESEARCH_MIN_CITATION_COVERAGE=${process.env.MIND_RESEARCH_MIN_CITATION_COVERAGE ?? "0.8"}`,
+  `MIND_RESEARCH_SOFT_TIMEOUT_SECONDS=${process.env.MIND_RESEARCH_SOFT_TIMEOUT_SECONDS ?? "420"}`,
   `MIND_RESEARCH_JOB_TIMEOUT_SECONDS=${process.env.MIND_RESEARCH_JOB_TIMEOUT_SECONDS ?? "600"}`,
+  `MIND_RESEARCH_MAX_CONCURRENT_SEARCHES=${process.env.MIND_RESEARCH_MAX_CONCURRENT_SEARCHES ?? "2"}`,
+  `MIND_RESEARCH_MAX_TRANSPORT_RETRIES=${process.env.MIND_RESEARCH_MAX_TRANSPORT_RETRIES ?? "5"}`,
+  `MIND_RESEARCH_MAX_RATE_LIMIT_RETRIES=${process.env.MIND_RESEARCH_MAX_RATE_LIMIT_RETRIES ?? "3"}`,
+  `MIND_RESEARCH_MAX_STAGE_ATTEMPTS=${process.env.MIND_RESEARCH_MAX_STAGE_ATTEMPTS ?? "2"}`,
+  `MIND_RESEARCH_RETRY_BASE_SECONDS=${process.env.MIND_RESEARCH_RETRY_BASE_SECONDS ?? "2"}`,
+  `MIND_RESEARCH_MAX_EVIDENCE_CHARACTERS=${process.env.MIND_RESEARCH_MAX_EVIDENCE_CHARACTERS ?? "60000"}`,
 ]);
 
 run(gcloud, [

@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import re
 import unittest
+import uuid
 
-from backend.models import ResearchCitation, ResearchSource
+from backend.models import (
+    ResearchCitation,
+    ResearchCitationKind,
+    ResearchEvidenceStatus,
+    ResearchSource,
+)
 from backend.research_quality import evaluate_research_quality
 
 
@@ -137,7 +144,18 @@ class ResearchQualityTest(unittest.TestCase):
                     ),
                 )
             ],
-            citations=[],
+            citations=[
+                ResearchCitation(
+                    source_id="S1",
+                    title="Background mode",
+                    url=(
+                        "https://developers.openai.com/api/docs/guides/background"
+                    ),
+                    start_index=match.start(),
+                    end_index=match.end(),
+                )
+                for match in re.finditer(r"\[S1\]", report)
+            ],
         )
 
         self.assertEqual(metrics.citation_coverage, 0.6667)
@@ -150,8 +168,23 @@ class ResearchQualityTest(unittest.TestCase):
         )
         metrics = evaluate_research_quality(
             report=report,
-            sources=[],
-            citations=[],
+            sources=[
+                ResearchSource(
+                    id="S1",
+                    step_id="search-r1-q1",
+                    title="Background mode",
+                    url="https://example.com/background",
+                )
+            ],
+            citations=[
+                ResearchCitation(
+                    source_id="S1",
+                    title="Background mode",
+                    url="https://example.com/background",
+                    start_index=report.index("[S1]"),
+                    end_index=report.index("[S1]") + 4,
+                )
+            ],
         )
 
         self.assertEqual(metrics.citation_coverage, 1.0)
@@ -165,11 +198,78 @@ class ResearchQualityTest(unittest.TestCase):
         )
         metrics = evaluate_research_quality(
             report=report,
-            sources=[],
-            citations=[],
+            sources=[
+                ResearchSource(
+                    id="S1",
+                    step_id="search-r1-q1",
+                    title="Background mode",
+                    url="https://example.com/background",
+                )
+            ],
+            citations=[
+                ResearchCitation(
+                    source_id="S1",
+                    title="Background mode",
+                    url="https://example.com/background",
+                    start_index=report.index("[S1]"),
+                    end_index=report.index("[S1]") + 4,
+                )
+            ],
         )
 
         self.assertEqual(metrics.citation_coverage, 1.0)
+
+    def test_file_provenance_is_not_external_corroboration(self) -> None:
+        report = (
+            "The attached document states that the event occurred in 2025 [F1]. "
+            "A primary record independently confirms the location [F1] [S1]."
+        )
+        first_file = report.index("[F1]")
+        second_file = report.index("[F1]", first_file + 1)
+        web = report.index("[S1]")
+        metrics = evaluate_research_quality(
+            report=report,
+            sources=[
+                ResearchSource(
+                    id="S1",
+                    step_id="search-r1-file-claims",
+                    title="Primary record",
+                    url="https://example.edu/record",
+                )
+            ],
+            citations=[
+                ResearchCitation(
+                    source_id="F1",
+                    title="Uploaded document.pdf",
+                    file_id=uuid.UUID(int=1),
+                    kind=ResearchCitationKind.FILE,
+                    verification_status=ResearchEvidenceStatus.FILE_PROVIDED,
+                    start_index=first_file,
+                    end_index=first_file + 4,
+                ),
+                ResearchCitation(
+                    source_id="F1",
+                    title="Uploaded document.pdf",
+                    file_id=uuid.UUID(int=1),
+                    kind=ResearchCitationKind.FILE,
+                    verification_status=ResearchEvidenceStatus.CORROBORATED,
+                    start_index=second_file,
+                    end_index=second_file + 4,
+                ),
+                ResearchCitation(
+                    source_id="S1",
+                    title="Primary record",
+                    url="https://example.edu/record",
+                    start_index=web,
+                    end_index=web + 4,
+                ),
+            ],
+        )
+
+        self.assertEqual(metrics.citation_coverage, 1.0)
+        self.assertEqual(metrics.web_citation_coverage, 0.5)
+        self.assertEqual(metrics.file_corroboration_coverage, 0.5)
+        self.assertEqual(metrics.unverified_file_claim_count, 1)
 
 
 if __name__ == "__main__":

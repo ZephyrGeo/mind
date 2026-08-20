@@ -33,10 +33,19 @@ from .deepseek_provider import DeepSeekProvider
 from .errors import APIError
 from .fake_agent import FakeAgentProvider
 from .firestore_store import (
+    FirestoreAttachmentRepository,
     FirestoreConversationRepository,
     FirestoreMemoryRepository,
     FirestoreResearchRepository,
 )
+from .file_service import (
+    AttachmentNotReadyError,
+    FileService,
+    FileStorageError,
+    FileValidationError,
+)
+from .file_storage import FileStorage, GCSFileStorage, LocalFileStorage
+from .file_store import AttachmentNotFoundError, JsonAttachmentRepository
 from .memory_embedding import HashEmbeddingProvider, OpenAIEmbeddingProvider
 from .memory_provider import OpenAIMemoryProvider, RuleMemoryProvider
 from .memory_retrieval import LocalMemoryRetriever
@@ -49,6 +58,8 @@ from .memory_store import JsonMemoryRepository, MemoryNotFoundError
 from .model_provider import ModelProvider, ModelProviderError
 from .models import (
     ChatRequest,
+    AttachmentSummary,
+    AttachmentsResponse,
     Conversation,
     ConversationsResponse,
     ErrorBody,
@@ -66,7 +77,11 @@ from .models import (
 )
 from .observability import configure_logging, log_event
 from .openai_research_provider import OpenAIResearchProvider
-from .repositories import ConversationRepository, MemoryRepository
+from .repositories import (
+    AttachmentRepository,
+    ConversationRepository,
+    MemoryRepository,
+)
 from .research_provider import ResearchProvider, ResearchProviderError
 from .research_repositories import ResearchRepository
 from .research_service import (
@@ -192,6 +207,37 @@ def create_memory_repository(settings: Settings) -> MemoryRepository:
     )
 
 
+def create_attachment_repository(settings: Settings) -> AttachmentRepository:
+    """Build local JSON or production Firestore attachment metadata persistence."""
+
+    if settings.persistence_provider == "json":
+        return JsonAttachmentRepository(settings.attachment_data_path)
+    if settings.persistence_provider == "firestore":
+        if settings.firebase_project_id is None:
+            raise ValueError("Firebase project ID is missing.")
+        return FirestoreAttachmentRepository(
+            project_id=settings.firebase_project_id,
+            database_id=settings.firestore_database_id,
+        )
+    raise ValueError(
+        f"Unsupported persistence provider: {settings.persistence_provider}"
+    )
+
+
+def create_file_storage(settings: Settings) -> FileStorage:
+    """Build private local or Google Cloud original-file storage."""
+
+    if settings.file_storage_provider == "local":
+        return LocalFileStorage(settings.local_file_path)
+    if settings.file_storage_provider == "gcs":
+        if settings.file_storage_bucket is None:
+            raise ValueError("GCS file storage bucket is missing.")
+        return GCSFileStorage(bucket_name=settings.file_storage_bucket)
+    raise ValueError(
+        f"Unsupported file storage provider: {settings.file_storage_provider}"
+    )
+
+
 def create_memory_provider(settings: Settings) -> RuleMemoryProvider | OpenAIMemoryProvider:
     if settings.memory_provider == "rules":
         return RuleMemoryProvider()
@@ -314,6 +360,9 @@ def create_app(
     research_provider: ResearchProvider | None = None,
     memory_repository: MemoryRepository | None = None,
     memory_service: MemoryService | None = None,
+    attachment_repository: AttachmentRepository | None = None,
+    file_storage: FileStorage | None = None,
+    file_service: FileService | None = None,
     principal_verifier: PrincipalVerifier | None = None,
     account_manager: AccountManager | None = None,
 ) -> FastAPI:
@@ -370,6 +419,34 @@ def create_app(
         runtime_settings,
         runtime_principal_verifier,
     )
+    if file_service is None:
+        runtime_attachment_repository = (
+            attachment_repository or create_attachment_repository(runtime_settings)
+        )
+        runtime_file_storage = file_storage or create_file_storage(runtime_settings)
+        runtime_file_service = FileService(
+            repository=runtime_attachment_repository,
+            storage=runtime_file_storage,
+            max_file_bytes=runtime_settings.max_file_bytes,
+            max_file_pages=runtime_settings.max_file_pages,
+            max_extracted_characters=(
+                runtime_settings.max_extracted_file_characters
+            ),
+            max_context_characters=runtime_settings.max_file_context_characters,
+            max_files_per_request=runtime_settings.max_files_per_request,
+        )
+    else:
+        if (
+            attachment_repository is not None
+            and attachment_repository is not file_service.repository
+        ):
+            raise ValueError(
+                "Injected FileService and AttachmentRepository must use the same "
+                "repository."
+            )
+        runtime_file_service = file_service
+        runtime_attachment_repository = file_service.repository
+        runtime_file_storage = file_service.storage
     logger = configure_logging(
         runtime_settings.log_level,
         runtime_settings.quiet,
@@ -403,6 +480,9 @@ def create_app(
     application.state.embedding_provider = runtime_embedding_provider
     application.state.principal_verifier = runtime_principal_verifier
     application.state.account_manager = runtime_account_manager
+    application.state.attachment_repository = runtime_attachment_repository
+    application.state.file_storage = runtime_file_storage
+    application.state.file_service = runtime_file_service
     application.state.logger = logger
     research_service = ResearchService(
         conversations=runtime_repository,
@@ -421,9 +501,25 @@ def create_app(
         min_citation_coverage=(
             runtime_settings.research_min_citation_coverage
         ),
+        soft_timeout_seconds=runtime_settings.research_soft_timeout_seconds,
         job_timeout_seconds=runtime_settings.research_job_timeout_seconds,
+        max_concurrent_searches=(
+            runtime_settings.research_max_concurrent_searches
+        ),
+        max_transport_retries=(
+            runtime_settings.research_max_transport_retries
+        ),
+        max_rate_limit_retries=(
+            runtime_settings.research_max_rate_limit_retries
+        ),
+        max_stage_attempts=runtime_settings.research_max_stage_attempts,
+        retry_base_seconds=runtime_settings.research_retry_base_seconds,
+        max_evidence_characters=(
+            runtime_settings.research_max_evidence_characters
+        ),
         max_tool_calls_per_task=runtime_settings.research_max_tool_calls,
         memory_service=runtime_memory_service,
+        file_service=runtime_file_service,
         logger=logger,
     )
     application.state.research_service = research_service
@@ -431,9 +527,14 @@ def create_app(
     @application.middleware("http")
     async def request_size_limit(request: Request, call_next: Any) -> Any:
         content_length = request.headers.get("Content-Length")
+        request_limit = (
+            runtime_settings.max_file_bytes
+            if request.url.path == "/api/files"
+            else runtime_settings.max_request_bytes
+        )
         if content_length:
             try:
-                too_large = int(content_length) > runtime_settings.max_request_bytes
+                too_large = int(content_length) > request_limit
             except ValueError:
                 too_large = True
             if too_large:
@@ -443,7 +544,7 @@ def create_app(
                     code="request_too_large",
                     message=(
                         "Request body exceeds the configured "
-                        f"{runtime_settings.max_request_bytes}-byte limit."
+                        f"{request_limit}-byte limit."
                     ),
                 )
                 return response
@@ -637,6 +738,100 @@ def create_app(
                 code="conversation_not_found",
                 message="Conversation does not exist for this user.",
             ) from None
+
+    @application.get(
+        "/api/files",
+        response_model=AttachmentsResponse,
+        responses={401: {"model": ErrorResponse}},
+        tags=["files"],
+        operation_id="listFiles",
+    )
+    async def list_files(principal: Principal) -> AttachmentsResponse:
+        return AttachmentsResponse(
+            attachments=runtime_file_service.list_attachments(principal.user_id)
+        )
+
+    @application.post(
+        "/api/files",
+        response_model=AttachmentSummary,
+        status_code=201,
+        responses={
+            401: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["files"],
+        operation_id="uploadFile",
+    )
+    async def upload_file(
+        name: str,
+        request: Request,
+        principal: Principal,
+    ) -> AttachmentSummary:
+        content = bytearray()
+        async for chunk in request.stream():
+            content.extend(chunk)
+            if len(content) > runtime_settings.max_file_bytes:
+                raise APIError(
+                    status_code=413,
+                    code="file_too_large",
+                    message=(
+                        "Files must be no larger than "
+                        f"{runtime_settings.max_file_bytes // 1_000_000} MB."
+                    ),
+                )
+        try:
+            return runtime_file_service.upload(
+                user_id=principal.user_id,
+                name=name,
+                media_type=request.headers.get("Content-Type", ""),
+                content=bytes(content),
+            )
+        except FileValidationError as error:
+            status_code = 413 if error.code == "file_too_large" else 422
+            raise APIError(
+                status_code=status_code,
+                code=error.code,
+                message=error.public_message,
+            ) from None
+        except FileStorageError:
+            raise APIError(
+                status_code=503,
+                code="file_storage_unavailable",
+                message="Private file storage is temporarily unavailable.",
+            ) from None
+
+    @application.delete(
+        "/api/files/{attachment_id}",
+        status_code=204,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["files"],
+        operation_id="deleteFile",
+    )
+    async def delete_file(
+        attachment_id: uuid.UUID,
+        principal: Principal,
+    ) -> Response:
+        try:
+            runtime_file_service.delete(attachment_id, principal.user_id)
+        except AttachmentNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="attachment_not_found",
+                message="Attachment does not exist for this user.",
+            ) from None
+        except FileStorageError:
+            raise APIError(
+                status_code=503,
+                code="file_storage_unavailable",
+                message="Private file storage is temporarily unavailable.",
+            ) from None
+        return Response(status_code=204)
 
     @application.get(
         "/api/memories",
@@ -883,6 +1078,19 @@ def create_app(
                     ),
                 ) from error
 
+        # External object cleanup runs first so a retryable storage outage does
+        # not erase the user's remaining records while leaving originals behind.
+        try:
+            runtime_file_service.delete_for_user(principal.user_id)
+        except FileStorageError:
+            raise APIError(
+                status_code=503,
+                code="account_cleanup_blocked",
+                message=(
+                    "Mind could not remove private files. "
+                    "Please retry account deletion."
+                ),
+            ) from None
         runtime_repository.delete_for_user(principal.user_id)
         runtime_research_repository.delete_for_user(principal.user_id)
         runtime_memory_repository.delete_for_user(principal.user_id)
@@ -961,6 +1169,24 @@ def create_app(
                 status_code=404,
                 code="conversation_not_found",
                 message="Conversation does not exist for this user.",
+            ) from None
+        except AttachmentNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="attachment_not_found",
+                message="Attachment does not exist for this user.",
+            ) from None
+        except AttachmentNotReadyError as error:
+            raise APIError(
+                status_code=409,
+                code="attachment_not_ready",
+                message=str(error),
+            ) from None
+        except FileValidationError as error:
+            raise APIError(
+                status_code=422,
+                code=error.code,
+                message=error.public_message,
             ) from None
         request_id = _request_id(request)
 
@@ -1101,6 +1327,29 @@ def create_app(
         request: Request,
     ) -> StreamingResponse:
         request_id = _request_id(request)
+        try:
+            file_ids, file_context = runtime_file_service.context_for_ids(
+                principal.user_id,
+                payload.attachment_ids,
+            )
+        except AttachmentNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="attachment_not_found",
+                message="Attachment does not exist for this user.",
+            ) from None
+        except AttachmentNotReadyError as error:
+            raise APIError(
+                status_code=409,
+                code="attachment_not_ready",
+                message=str(error),
+            ) from None
+        except FileValidationError as error:
+            raise APIError(
+                status_code=422,
+                code=error.code,
+                message=error.public_message,
+            ) from None
         user_id_hash = hashlib.sha256(
             principal.user_id.encode("utf-8")
         ).hexdigest()[:16]
@@ -1131,14 +1380,20 @@ def create_app(
                             0,
                             runtime_settings.max_context_characters
                             - len(payload.message)
-                            - len(memory_context),
+                            - len(memory_context)
+                            - len(file_context),
                         ),
                     )
+                provider_context: dict[str, Any] = {
+                    "history": history,
+                    "memory_context": memory_context,
+                }
+                if file_context:
+                    provider_context["file_context"] = file_context
                 for delta in runtime_provider.stream_reply(
                     payload.message,
                     payload.mode,
-                    history=history,
-                    memory_context=memory_context,
+                    **provider_context,
                 ):
                     reply_parts.append(delta)
                     yield _sse_event({"type": "delta", "delta": delta})
@@ -1149,6 +1404,7 @@ def create_app(
                     "".join(reply_parts),
                     payload.mode,
                     user_id=principal.user_id,
+                    attachment_ids=file_ids,
                 )
                 try:
                     candidates = (
@@ -1203,6 +1459,7 @@ def create_app(
                         len(message.content) for message in history
                     ),
                     retrieved_memory_count=len(memory_ids),
+                    attached_file_count=len(file_ids),
                     memory_candidate_count=memory_candidate_count,
                     memory_saved_count=memory_saved_count,
                     token_usage=(

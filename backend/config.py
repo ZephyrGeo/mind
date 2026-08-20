@@ -14,6 +14,10 @@ DEFAULT_RESEARCH_DATA_PATH = (
     PROJECT_ROOT / "work" / "local-data" / "research-jobs.json"
 )
 DEFAULT_MEMORY_DATA_PATH = PROJECT_ROOT / "work" / "local-data" / "memories.json"
+DEFAULT_ATTACHMENT_DATA_PATH = (
+    PROJECT_ROOT / "work" / "local-data" / "attachments.json"
+)
+DEFAULT_LOCAL_FILE_PATH = PROJECT_ROOT / "work" / "local-files"
 DEFAULT_LOCAL_TOKEN = "local-demo-token"
 DEFAULT_ALLOWED_ORIGINS = (
     "http://127.0.0.1:3000",
@@ -53,6 +57,15 @@ class Settings:
     data_path: Path = DEFAULT_DATA_PATH
     research_data_path: Path = DEFAULT_RESEARCH_DATA_PATH
     memory_data_path: Path = DEFAULT_MEMORY_DATA_PATH
+    attachment_data_path: Path = DEFAULT_ATTACHMENT_DATA_PATH
+    file_storage_provider: str = "local"
+    local_file_path: Path = DEFAULT_LOCAL_FILE_PATH
+    file_storage_bucket: str | None = None
+    max_file_bytes: int = 20_000_000
+    max_file_pages: int = 200
+    max_extracted_file_characters: int = 120_000
+    max_file_context_characters: int = 24_000
+    max_files_per_request: int = 5
     allowed_origins: tuple[str, ...] = field(
         default_factory=lambda: DEFAULT_ALLOWED_ORIGINS
     )
@@ -88,7 +101,14 @@ class Settings:
     research_tool_call_overrun_ratio: float = 0.15
     research_max_tool_call_overrun: int = 3
     research_min_citation_coverage: float = 0.8
+    research_soft_timeout_seconds: int = 420
     research_job_timeout_seconds: int = 600
+    research_max_concurrent_searches: int = 2
+    research_max_transport_retries: int = 5
+    research_max_rate_limit_retries: int = 3
+    research_max_stage_attempts: int = 2
+    research_retry_base_seconds: float = 2.0
+    research_max_evidence_characters: int = 60_000
     research_poll_interval_seconds: float = 2.0
     openai_timeout_seconds: float = 120.0
     log_level: str = "INFO"
@@ -116,6 +136,28 @@ class Settings:
             raise ValueError(
                 "MIND_FIREBASE_PROJECT_ID is required for Firestore persistence."
             )
+        if self.file_storage_provider not in {"local", "gcs"}:
+            raise ValueError("MIND_FILE_STORAGE_PROVIDER must be local or gcs.")
+        if self.file_storage_provider == "gcs" and not (
+            self.file_storage_bucket and self.file_storage_bucket.strip()
+        ):
+            raise ValueError(
+                "MIND_FILE_STORAGE_BUCKET is required with GCS file storage."
+            )
+        if not 1 <= self.max_file_bytes <= 20_000_000:
+            raise ValueError("MIND_MAX_FILE_BYTES must be between 1 and 20000000.")
+        if not 1 <= self.max_file_pages <= 500:
+            raise ValueError("MIND_MAX_FILE_PAGES must be between 1 and 500.")
+        if not 1_000 <= self.max_extracted_file_characters <= 500_000:
+            raise ValueError(
+                "MIND_MAX_EXTRACTED_FILE_CHARACTERS must be between 1000 and 500000."
+            )
+        if not 1_000 <= self.max_file_context_characters <= 64_000:
+            raise ValueError(
+                "MIND_MAX_FILE_CONTEXT_CHARACTERS must be between 1000 and 64000."
+            )
+        if not 1 <= self.max_files_per_request <= 10:
+            raise ValueError("MIND_MAX_FILES_PER_REQUEST must be between 1 and 10.")
         if self.account_deletion_max_auth_age_seconds < 1:
             raise ValueError(
                 "MIND_ACCOUNT_DELETION_MAX_AUTH_AGE_SECONDS must be positive."
@@ -239,6 +281,40 @@ class Settings:
             raise ValueError(
                 "MIND_RESEARCH_JOB_TIMEOUT_SECONDS must be between 60 and 3600."
             )
+        if not (
+            1
+            <= self.research_soft_timeout_seconds
+            < self.research_job_timeout_seconds
+        ):
+            raise ValueError(
+                "MIND_RESEARCH_SOFT_TIMEOUT_SECONDS must be positive and precede "
+                "MIND_RESEARCH_JOB_TIMEOUT_SECONDS."
+            )
+        if not 1 <= self.research_max_concurrent_searches <= 8:
+            raise ValueError(
+                "MIND_RESEARCH_MAX_CONCURRENT_SEARCHES must be between 1 and 8."
+            )
+        if not 0 <= self.research_max_transport_retries <= 10:
+            raise ValueError(
+                "MIND_RESEARCH_MAX_TRANSPORT_RETRIES must be between 0 and 10."
+            )
+        if not 0 <= self.research_max_rate_limit_retries <= 10:
+            raise ValueError(
+                "MIND_RESEARCH_MAX_RATE_LIMIT_RETRIES must be between 0 and 10."
+            )
+        if not 1 <= self.research_max_stage_attempts <= 3:
+            raise ValueError(
+                "MIND_RESEARCH_MAX_STAGE_ATTEMPTS must be between 1 and 3."
+            )
+        if self.research_retry_base_seconds <= 0:
+            raise ValueError(
+                "MIND_RESEARCH_RETRY_BASE_SECONDS must be positive."
+            )
+        if not 10_000 <= self.research_max_evidence_characters <= 500_000:
+            raise ValueError(
+                "MIND_RESEARCH_MAX_EVIDENCE_CHARACTERS must be between 10000 "
+                "and 500000."
+            )
         if self.research_poll_interval_seconds <= 0:
             raise ValueError(
                 "MIND_RESEARCH_POLL_INTERVAL_SECONDS must be positive."
@@ -275,6 +351,10 @@ class Settings:
                 raise ValueError(
                     "OpenAI Memory extraction and Embeddings are required outside "
                     "development or test."
+                )
+            if self.file_storage_provider != "gcs":
+                raise ValueError(
+                    "GCS file storage is required outside development or test."
                 )
 
     @classmethod
@@ -322,6 +402,36 @@ class Settings:
                     "MIND_MEMORY_DATA_PATH",
                     str(DEFAULT_MEMORY_DATA_PATH),
                 )
+            ),
+            attachment_data_path=Path(
+                os.environ.get(
+                    "MIND_ATTACHMENT_DATA_PATH",
+                    str(DEFAULT_ATTACHMENT_DATA_PATH),
+                )
+            ),
+            file_storage_provider=os.environ.get(
+                "MIND_FILE_STORAGE_PROVIDER",
+                "local",
+            ),
+            local_file_path=Path(
+                os.environ.get("MIND_LOCAL_FILE_PATH", str(DEFAULT_LOCAL_FILE_PATH))
+            ),
+            file_storage_bucket=os.environ.get("MIND_FILE_STORAGE_BUCKET"),
+            max_file_bytes=int(
+                os.environ.get("MIND_MAX_FILE_BYTES", "20000000")
+            ),
+            max_file_pages=int(os.environ.get("MIND_MAX_FILE_PAGES", "200")),
+            max_extracted_file_characters=int(
+                os.environ.get(
+                    "MIND_MAX_EXTRACTED_FILE_CHARACTERS",
+                    "120000",
+                )
+            ),
+            max_file_context_characters=int(
+                os.environ.get("MIND_MAX_FILE_CONTEXT_CHARACTERS", "24000")
+            ),
+            max_files_per_request=int(
+                os.environ.get("MIND_MAX_FILES_PER_REQUEST", "5")
             ),
             allowed_origins=_csv(
                 os.environ.get("MIND_ALLOWED_ORIGINS"),
@@ -421,8 +531,29 @@ class Settings:
             research_min_citation_coverage=float(
                 os.environ.get("MIND_RESEARCH_MIN_CITATION_COVERAGE", "0.8")
             ),
+            research_soft_timeout_seconds=int(
+                os.environ.get("MIND_RESEARCH_SOFT_TIMEOUT_SECONDS", "420")
+            ),
             research_job_timeout_seconds=int(
                 os.environ.get("MIND_RESEARCH_JOB_TIMEOUT_SECONDS", "600")
+            ),
+            research_max_concurrent_searches=int(
+                os.environ.get("MIND_RESEARCH_MAX_CONCURRENT_SEARCHES", "2")
+            ),
+            research_max_transport_retries=int(
+                os.environ.get("MIND_RESEARCH_MAX_TRANSPORT_RETRIES", "5")
+            ),
+            research_max_rate_limit_retries=int(
+                os.environ.get("MIND_RESEARCH_MAX_RATE_LIMIT_RETRIES", "3")
+            ),
+            research_max_stage_attempts=int(
+                os.environ.get("MIND_RESEARCH_MAX_STAGE_ATTEMPTS", "2")
+            ),
+            research_retry_base_seconds=float(
+                os.environ.get("MIND_RESEARCH_RETRY_BASE_SECONDS", "2")
+            ),
+            research_max_evidence_characters=int(
+                os.environ.get("MIND_RESEARCH_MAX_EVIDENCE_CHARACTERS", "60000")
             ),
             research_poll_interval_seconds=float(
                 os.environ.get("MIND_RESEARCH_POLL_INTERVAL_SECONDS", "2")

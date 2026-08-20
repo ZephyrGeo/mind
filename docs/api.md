@@ -23,6 +23,9 @@ Interactive documentation is available while the API is running:
 | `POST` | `/api/memories/{memory_id}/confirm` | Bearer token | Confirm a candidate, conflict, update, or stale fact; accepted replacements supersede the prior version |
 | `PATCH` | `/api/memories/{memory_id}` | Bearer token | Edit, pin, enable/disable, retype, or expire one owned memory |
 | `DELETE` | `/api/memories/{memory_id}` | Bearer token | Permanently delete one owned memory; returns 204 |
+| `GET` | `/api/files` | Bearer token | List safe metadata for the current user's uploaded files |
+| `POST` | `/api/files?name={filename}` | Bearer token | Upload one raw TXT or PDF body for private extraction; returns 201 |
+| `DELETE` | `/api/files/{attachment_id}` | Bearer token | Delete one owned original and its metadata; returns 204 |
 | `DELETE` | `/api/account` | Bearer token + recent sign-in | Stop active Research, delete owned data, and delete the Firebase identity |
 | `POST` | `/api/chat` | Bearer token | Stream an assistant response using Server-Sent Events |
 | `POST` | `/api/research` | Bearer token | Create and stream a checkpointed research job |
@@ -41,32 +44,40 @@ allowlist before any tenant-scoped repository operation.
   "conversation_id": null,
   "message": "Explain this design.",
   "mode": "chat",
-  "attachments": []
+  "attachment_ids": ["00000000-0000-0000-0000-000000000001"]
 }
 ```
 
 `mode` accepts `chat` or `research`. The latter remains a single-model reasoning
 call for compatibility; the frontend uses the dedicated `/api/research`
-workflow for actual search. Attachment entries only carry staged filename and
-size metadata; no file content is uploaded yet.
+workflow for actual search. Upload files first, then send their returned IDs in
+`attachment_ids`. Mind reloads only files owned by the authenticated user,
+injects bounded extracted text as untrusted reference data, and stores the IDs
+on the user message for provenance.
 
 ## Research request
 
 ```json
 {
   "conversation_id": null,
-  "query": "Compare the evidence for two personal-agent architectures."
+  "query": "Compare this brief with current evidence.",
+  "attachment_ids": ["00000000-0000-0000-0000-000000000001"]
 }
 ```
 
 A new job persists the user message and conversation ID, then Mind runs a
 multi-stage Research Harness:
 
-1. Terra creates a structured Research Brief with 4–8 subquestions.
-2. Each subquestion gets its own background Response with built-in `web_search`.
-3. Terra checks the aggregated evidence for gaps and conflicts without searching.
-4. Material gaps trigger one bounded second round of search workers.
-5. Terra writes one report using Mind's stable `[S#]` source markers.
+1. Terra creates a structured Research Brief from the user request, without raw
+   attachment contents.
+2. A separate no-tool Response extracts bounded claims from attachments and flags
+   likely embedded instructions. Only the sanitized claim ledger can reach search.
+3. Each subquestion gets its own background Response with built-in `web_search`.
+4. Terra checks the aggregated evidence for gaps, attachment corroboration, and
+   conflicts without searching.
+5. Material gaps trigger one bounded second round of search workers.
+6. Terra writes one report using `[S#]` for independent web evidence and `[F#]` for
+   untrusted file provenance.
 
 Every stage is a provider-independent subtask with its own response ID, status,
 output, sources, citations, and tool usage. DeepSeek Chat is not part of this
@@ -77,13 +88,13 @@ Research SSE frames are ordered but not every type occurs exactly once:
 ```text
 data: {"type":"research_started","job_id":"...","conversation_id":"...","status":"queued","progress":0}
 
-data: {"type":"status","job_id":"...","status":"collecting","provider_status":"in_progress","progress":0.42,"search_round":1,"max_search_rounds":2,"completed_subtasks":3,"total_subtasks":5,"total_tool_calls":4,"max_total_tool_calls":24,"max_tool_call_overrun":3,"hard_max_total_tool_calls":27,"budget_exceeded":false,"hard_budget_reached":false,"citation_coverage":null}
+data: {"type":"status","job_id":"...","status":"collecting","provider_status":"in_progress","progress":0.42,"search_round":1,"max_search_rounds":2,"completed_subtasks":3,"total_subtasks":5,"total_tool_calls":4,"max_total_tool_calls":24,"max_tool_call_overrun":3,"hard_max_total_tool_calls":27,"budget_exceeded":false,"hard_budget_reached":false,"soft_deadline_reached":false,"recovery_state":"retrying","retry_after_seconds":2,"degraded_reasons":[],"citation_coverage":null}
 
 data: {"type":"source","job_id":"...","source":{"id":"S1","title":"...","url":"https://..."}}
 
 data: {"type":"delta","job_id":"...","delta":"## Findings"}
 
-data: {"type":"done","job_id":"...","conversation_id":"...","status":"completed","progress":1,"source_count":8,"citation_coverage":0.92,"citations":[{"source_id":"S1","url":"https://...","start_index":41,"end_index":44}]}
+data: {"type":"done","job_id":"...","conversation_id":"...","status":"completed","progress":1,"source_count":8,"citation_coverage":0.92,"web_citation_coverage":0.75,"file_corroboration_coverage":0.5,"quality_warning":"One file-derived claim is not independently corroborated.","citations":[{"source_id":"S1","kind":"web","url":"https://...","start_index":41,"end_index":45},{"source_id":"F1","kind":"file","file_id":"...","verification_status":"unverified","start_index":46,"end_index":50}]}
 ```
 
 OpenAI `queued`, `in_progress`, `completed`, `failed`/`incomplete`, and
@@ -93,6 +104,17 @@ disconnect or page reload retrieves existing Responses instead of starting
 duplicates. User cancellation calls the OpenAI cancel endpoint for every active
 subtask. Restarting a cancelled job begins a fresh Harness run and archives all
 previous response IDs.
+
+Transient retrieval and service failures retry the same saved response ID with
+bounded exponential backoff. Rate limiting pauses the whole job and emits the
+provider-neutral `rate_limited` recovery state plus a rounded retry countdown.
+Stage-shape, context-window, and incomplete-output failures may restart only that
+stage, at most once by default; the retry uses a smaller evidence packet and a
+more concise writing instruction. Search starts are limited to two concurrent
+workers. After the soft deadline, Mind cancels unfinished searches and continues
+with partial evidence when at least 60% of that round completed; the hard deadline
+cancels the remaining Responses and fails the job. Every retry timestamp, attempt
+counter, degraded reason, and response ID is persisted for refresh recovery.
 
 ## Streaming response
 
@@ -233,6 +255,15 @@ the unified report and global source ledger live beside it. Final
 assistant-message writes are idempotent by `research_job_id`, so polling or
 reconnecting cannot duplicate a completed report.
 
+`AttachmentRepository` stores private attachment metadata locally or below the
+same Firestore user subtree. `FileStorage` stores originals in an ignored local
+directory during development and in a private Cloud Storage bucket in staging.
+Public responses never expose storage URIs or extracted text. Research jobs save
+`input_file_ids`, a sanitized file-claim review, and file citation provenance;
+account deletion removes both metadata and original bytes. File citations prove
+where a statement came from, not that it is true. Independent corroboration and
+conflict status remain separate from citation coverage.
+
 Milestone-one local JSON records are normalized in memory when read, so older
 conversations that predate typed message IDs and tenant fields remain openable.
 The compatibility read does not rewrite the local data file.
@@ -244,5 +275,5 @@ calling the endpoint.
 
 The shared Pydantic models define `User`, `Conversation`, `Message`,
 `Attachment`, typed research jobs/checkpoints/sources/citations, `Memory`,
-`Routine`, and `ToolCall`. Routine, file, and voice repositories and endpoints
-remain future work.
+`Routine`, and `ToolCall`. Routine and voice repositories and endpoints remain
+future work.

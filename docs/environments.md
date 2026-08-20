@@ -13,7 +13,7 @@ separate provider boundary.
 | Research provider | OpenAI when configured | Mock OpenAI only | OpenAI with a capped evaluation budget | OpenAI with user quotas |
 | Authentication | Local bearer token | In-process test token | Firebase Authentication plus allowlist | Firebase Authentication plus allowlist |
 | Conversation store | Ignored local JSON | Temporary test directory | Firestore staging database | Firestore production database |
-| File store | Not implemented | Temporary fixtures | Dedicated staging bucket | Dedicated production bucket |
+| File store | Ignored local directory | Temporary fixtures | Dedicated private staging bucket | Dedicated private production bucket |
 | Frontend | Local Node server | Built artifact | Firebase Hosting preview/staging site | Firebase Hosting production site |
 | API | Local Python server | In-process tests | Dedicated Cloud Run service | Dedicated Cloud Run service |
 | Secrets | Shell environment only | CI secret store when required | Secret Manager | Secret Manager |
@@ -42,6 +42,15 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_DATA_PATH` | `work/local-data/conversations.json` | Ignored JSON persistence path |
 | `MIND_RESEARCH_DATA_PATH` | `work/local-data/research-jobs.json` | Ignored, atomic research checkpoint path |
 | `MIND_MEMORY_DATA_PATH` | `work/local-data/memories.json` | Ignored, atomic local Memory Ledger path |
+| `MIND_ATTACHMENT_DATA_PATH` | `work/local-data/attachments.json` | Ignored, atomic local attachment metadata path |
+| `MIND_FILE_STORAGE_PROVIDER` | `local` | `local` or `gcs`; staging/production require `gcs` |
+| `MIND_LOCAL_FILE_PATH` | `work/local-files` | Ignored private original-file directory for local development |
+| `MIND_FILE_STORAGE_BUCKET` | unset | Private GCS bucket name required when storage is `gcs` |
+| `MIND_MAX_FILE_BYTES` | `20000000` | Maximum raw bytes accepted for one TXT or PDF |
+| `MIND_MAX_FILE_PAGES` | `200` | Maximum pages parsed from one PDF |
+| `MIND_MAX_EXTRACTED_FILE_CHARACTERS` | `120000` | Maximum extracted characters retained per file |
+| `MIND_MAX_FILE_CONTEXT_CHARACTERS` | `24000` | Total file-text context budget for one Chat or Research request |
+| `MIND_MAX_FILES_PER_REQUEST` | `5` | Maximum owned attachment IDs accepted by one request |
 | `MIND_API_HOST` | `127.0.0.1` | API bind host; the container uses `0.0.0.0` |
 | `MIND_API_PORT` | `8000` | API port; the container uses `8080` |
 | `MIND_ALLOWED_ORIGINS` | Both local frontend origins | Comma-separated exact CORS origins |
@@ -75,7 +84,14 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_RESEARCH_TOOL_CALL_OVERRUN_RATIO` | `0.15` | Maximum proportional overrun considered when computing the hard search limit |
 | `MIND_RESEARCH_MAX_TOOL_CALL_OVERRUN` | `3` | Absolute cap on extra tool calls above the soft budget; the lower ratio-derived value wins |
 | `MIND_RESEARCH_MIN_CITATION_COVERAGE` | `0.8` | Minimum sentence-level factual claim coverage; up to two citation-repair Responses run before a low-coverage report may complete |
-| `MIND_RESEARCH_JOB_TIMEOUT_SECONDS` | `600` | Whole Harness deadline; active Responses are cancelled when exceeded |
+| `MIND_RESEARCH_SOFT_TIMEOUT_SECONDS` | `420` | Search deadline; stops new searches and continues with sufficient collected evidence |
+| `MIND_RESEARCH_JOB_TIMEOUT_SECONDS` | `600` | Hard Harness deadline; remaining active Responses are cancelled when exceeded |
+| `MIND_RESEARCH_MAX_CONCURRENT_SEARCHES` | `2` | Maximum search Responses running concurrently within one Research Job |
+| `MIND_RESEARCH_MAX_TRANSPORT_RETRIES` | `5` | Consecutive retry ceiling for transient retrieval and transport failures |
+| `MIND_RESEARCH_MAX_RATE_LIMIT_RETRIES` | `3` | Retry ceiling for provider-neutral too-many-requests backoff |
+| `MIND_RESEARCH_MAX_STAGE_ATTEMPTS` | `2` | Maximum generated Responses for a stage after bounded structural/context recovery |
+| `MIND_RESEARCH_RETRY_BASE_SECONDS` | `2` | Initial exponential retry delay; later retries cap at 30 seconds |
+| `MIND_RESEARCH_MAX_EVIDENCE_CHARACTERS` | `60000` | Maximum verification/synthesis evidence packet before deterministic truncation |
 | `MIND_RESEARCH_POLL_INTERVAL_SECONDS` | `2` | Delay between background Response status checks |
 | `MIND_OPENAI_TIMEOUT_SECONDS` | `120` | Timeout for each OpenAI HTTP request |
 | `MIND_LOG_LEVEL` | `INFO` | Structured API log level |
@@ -182,6 +198,12 @@ Staging deployment also ensures a 256-dimension flat vector index for the
 `memories.embedding` field. The API uses a bounded vector/lexical fallback while
 the index builds, then automatically uses Firestore nearest-neighbor queries
 when it becomes ready.
+
+Staging also creates a private Cloud Storage bucket with uniform bucket-level
+access and public access prevention. Only the API service account receives
+object access; the browser uploads through the authenticated API and never gets
+a public object URL. Soft delete is disabled so account deletion does not retain
+a recoverable original-file copy.
 
 Git ignores `.env` and every `.env.*` file except the redacted
 `.env.example`. Terraform state, generated credentials, and provider cache files

@@ -29,6 +29,8 @@ test("local development loads an optional ignored environment file", async () =>
   assert.match(example, /^MIND_AUTH_PROVIDER=local$/m);
   assert.match(example, /^MIND_PERSISTENCE_PROVIDER=json$/m);
   assert.match(example, /^MIND_FIRESTORE_DATABASE_ID=\(default\)$/m);
+  assert.match(example, /^MIND_FILE_STORAGE_PROVIDER=local$/m);
+  assert.match(example, /^MIND_MAX_FILE_BYTES=20000000$/m);
   assert.match(example, /^MIND_MEMORY_PROVIDER=rules$/m);
   assert.match(example, /^MIND_MEMORY_MODEL=gpt-5\.4-mini$/m);
   assert.match(example, /^MIND_EMBEDDING_PROVIDER=local$/m);
@@ -68,7 +70,16 @@ test("staging grants the API Firebase Auth access and mounts model secrets", asy
     assert.match(source, /MIND_EMBEDDING_PROVIDER/);
     assert.match(source, /MIND_EMBEDDING_MODEL/);
     assert.match(source, /MIND_EMBEDDING_DIMENSIONS/);
+    assert.match(source, /MIND_FILE_STORAGE_PROVIDER/);
+    assert.match(source, /MIND_FILE_STORAGE_BUCKET/);
+    assert.match(source, /MIND_MAX_FILE_BYTES/);
   }
+  assert.match(deployScript, /ensureFileBucket/);
+  assert.match(deployScript, /roles\/storage\.objectAdmin/);
+  assert.match(terraform, /google_storage_bucket" "files/);
+  assert.match(terraform, /public_access_prevention\s*=\s*"enforced"/);
+  assert.match(terraform, /retention_duration_seconds\s*=\s*0/);
+  assert.match(deployScript, /--soft-delete-duration=0/);
   assert.match(deployScript, /ensureMemoryVectorIndex/);
   assert.match(deployScript, /collection-group["',\s]+memories/);
   assert.match(terraform, /google_firestore_index" "memory_embedding/);

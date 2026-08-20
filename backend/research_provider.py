@@ -87,8 +87,12 @@ class ResearchProviderError(RuntimeError):
         public_message: str,
         *,
         retryable: bool,
+        retry_after_seconds: float | None = None,
+        provider_status_code: int | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
         self.public_message = public_message
         self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+        self.provider_status_code = provider_status_code

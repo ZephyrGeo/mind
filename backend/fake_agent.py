@@ -52,6 +52,7 @@ class FakeAgentProvider:
         *,
         history: Sequence[ModelMessage] = (),
         memory_context: str = "",
+        file_context: str = "",
     ) -> Iterator[str]:
         del history
         reply = self.create_reply(message, mode)
@@ -65,6 +66,16 @@ class FakeAgentProvider:
                 "confirmed Memory Ledger context",
             )
             reply = f"I used this relevant memory: {remembered}\n\n{reply}"
+        if file_context:
+            file_label = next(
+                (
+                    line.strip("[]")
+                    for line in file_context.splitlines()
+                    if line.startswith("[File F")
+                ),
+                "an attached file",
+            )
+            reply = f"I used {file_label} as reference context.\n\n{reply}"
         for token in re.findall(r"\S+\s*|\n", reply):
             if self.delay_seconds:
                 time.sleep(self.delay_seconds)

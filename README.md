@@ -16,7 +16,9 @@ Deep Research uses an independent OpenAI ResearchProvider.
 - Bounded multi-turn model context from persisted conversation history
 - Mind Research Harness with a Research Brief, 4–6 parallel Terra web-search
   workers, evidence-gap and conflict checks, an optional second search round,
-  cited synthesis, per-subtask recovery, and cancel-all semantics
+  cited synthesis, persisted per-subtask recovery, bounded exponential backoff,
+  two-worker search concurrency, soft/hard deadlines, partial-evidence completion,
+  context reduction, and cancel-all semantics
 - Searchable, time-grouped conversation history with no display cap
 - Reopenable conversations after a page reload
 - Confirmed, tenant-scoped deletion of conversation history
@@ -35,6 +37,8 @@ Deep Research uses an independent OpenAI ResearchProvider.
 - OpenAI embeddings plus Firestore vector search select relevant confirmed
   memories for later Chat and Research; lexical fallback keeps retrieval available
   while an index builds or the embedding service is temporarily unavailable
+- Private, tenant-scoped TXT and PDF upload with bounded server-side extraction,
+  Chat/Research provenance, and account-deletion cleanup
 - Firebase Emulator and tenant-isolation Security Rules test workflow
 - Terraform staging foundation and CI quality gates
 - Python 3.12 container image running as a non-root user
@@ -59,7 +63,9 @@ Then open <http://127.0.0.1:3000/>.
 The local API runs at <http://127.0.0.1:8000/>. Conversation data is written to
 `work/local-data/conversations.json`; research checkpoints are written to
 `work/local-data/research-jobs.json`; Memory Ledger entries are written to
-`work/local-data/memories.json`. All are intentionally ignored by source control.
+`work/local-data/memories.json`; attachment metadata and private originals are
+written below `work/local-data/attachments.json` and `work/local-files/`. All are
+intentionally ignored by source control.
 
 The current milestone uses safe local defaults. For persistent project-local
 DeepSeek configuration, copy the ignored example once:
@@ -103,15 +109,20 @@ zero-cost deterministic extractor and embedding fallback. Staging and
 production require the OpenAI implementations.
 
 Research runs several bounded background OpenAI Responses. Mind plans and
-coordinates the stages; only evidence-collection workers enable built-in web
-search. The default budget is two rounds, at most six initial subquestions, 24
+coordinates the stages. Attached files first pass through an isolated, no-tool
+claim-extraction stage; raw file text never enters a web-search worker. Only
+evidence-collection workers enable built-in web search. The default budget is two
+rounds, at most six initial subquestions, 24
 total web-search calls, and ten minutes. Runs can therefore take several minutes
 and incur cost. DeepSeek remains the optional Chat provider and is not used by
 Research.
 
 Current canonical documentation is preferred over legacy guide URLs. Final
 reports must pass an 80% sentence-level citation coverage gate; up to two
-persisted citation-repair Responses run automatically when needed.
+persisted citation-repair Responses run automatically when needed. A useful report
+that remains below the target completes with an explicit quality warning rather
+than being hidden. `[S#]` identifies independent web evidence; `[F#]` attributes a
+claim to an untrusted uploaded file and does not by itself establish correctness.
 OpenAI Background-mode research also requires both the current canonical
 Background and data-controls guides before a report can complete.
 
@@ -172,7 +183,7 @@ Then open <http://127.0.0.1:8000/docs>.
 3. DeepSeek streaming provider and multi-turn conversations — complete
 4. Local checkpointed Deep Research MVP — complete
 5. Firebase Authentication and Firestore foundation — complete
-6. File and voice inputs
+6. TXT and PDF file input — complete; voice remains deferred
 7. Intelligent Memory Ledger — complete MVP; Heartbeats and Insight Diff follow
 8. Production research workers, Terraform, CI/CD, monitoring, and report
 

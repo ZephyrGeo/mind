@@ -236,6 +236,12 @@ Inline citations and source links must be clearly visible and clickable.
 
 ### 7. Guardrails and budgets
 
+Current status: Resilience Harness v1 is implemented for local and staging paths.
+It persists retry state, separates transport retries from bounded stage restarts,
+honors rate-limit retry hints with a provider-neutral UI, limits parallel searches,
+uses soft and hard deadlines, and can finish with an explicit partial-evidence
+warning when the minimum completed-search threshold is met.
+
 Enforce:
 
 - at most two search rounds;
@@ -256,6 +262,12 @@ Response, use tool-call limits, per-user quotas, concurrency limits, and usage
 reporting as the enforceable first version.
 
 ### 8. Idempotency and recovery
+
+Current status: Each retryable subtask keeps its response ID and persisted next
+retry time. Context or incomplete-output recovery restarts only the affected stage
+with a reduced evidence packet; a browser refresh resumes this state instead of
+creating a duplicate Response. Unit tests inject rate limits, transient retrieval
+failures, context limits, slow searches, and partial worker failure.
 
 The Harness must prevent:
 
@@ -494,12 +506,20 @@ Exit criteria:
 
 Estimated effort: 2–3 days
 
+Status: implemented on the file-input feature branch; staging deployment is
+pending review and merge.
+
 - Add bounded TXT and PDF upload.
 - Store originals in Cloud Storage.
 - Validate MIME type, extension, size, and ownership.
 - Extract bounded text server-side.
 - Attach files to Chat and Research requests.
 - Track provenance from injected text to file ID.
+- Treat files as untrusted evidence: isolate claim extraction from tool use, exclude
+  embedded instructions from downstream prompts, and verify material claims against
+  independent web sources.
+- Keep file provenance (`[F#]`) separate from web evidence (`[S#]`), with explicit
+  corroborated, unverified, and conflict states.
 - Delete owned files during account deletion.
 
 Exit criteria:
@@ -513,6 +533,10 @@ Voice and Google Drive are deferred until this path is complete.
 ### Phase 3 — Production Research Harness
 
 Estimated effort: 3–4 days
+
+Status: Core resilience, Firestore job persistence, refresh recovery, cancellation,
+bounded concurrency, deadlines, partial completion, and source/citation validation
+are implemented. Cloud Tasks reconciliation and production usage telemetry remain.
 
 - Move production Research Job persistence to Firestore.
 - Add Cloud Tasks reconciliation.
