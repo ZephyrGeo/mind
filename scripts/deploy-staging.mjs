@@ -3,6 +3,10 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 import { build } from "./build.mjs";
+import {
+  hasMemoryVectorIndex,
+  isAlreadyExistsError,
+} from "./firestore-indexes.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const projectId = process.env.MIND_FIREBASE_PROJECT_ID ?? "mind-staging-ce427";
@@ -173,38 +177,47 @@ function ensureMemoryVectorIndex() {
     { capture: true },
   );
   const indexes = rawIndexes ? JSON.parse(rawIndexes) : [];
-  const exists = indexes.some(
-    (index) =>
-      index.collectionGroup === "memories" &&
-      index.queryScope === "COLLECTION" &&
-      index.fields?.some(
-        (field) =>
-          field.fieldPath === "embedding" &&
-          Number(field.vectorConfig?.dimension) === dimensions,
-      ),
-  );
+  const exists = hasMemoryVectorIndex(indexes, dimensions);
   if (exists) {
     console.log(`Reusing the ${dimensions}-dimension Memory vector index.`);
     return;
   }
-  run(gcloud, [
-    "firestore",
-    "indexes",
-    "composite",
-    "create",
-    "--project",
-    projectId,
-    "--database",
-    "(default)",
-    "--collection-group",
-    "memories",
-    "--query-scope",
-    "COLLECTION",
-    "--field-config",
-    `field-path=embedding,vector-config={dimension=${dimensions},flat}`,
-    "--async",
-    "--quiet",
-  ]);
+  const result = spawnSync(
+    gcloud,
+    [
+      "firestore",
+      "indexes",
+      "composite",
+      "create",
+      "--project",
+      projectId,
+      "--database",
+      "(default)",
+      "--collection-group",
+      "memories",
+      "--query-scope",
+      "COLLECTION",
+      "--field-config",
+      `field-path=embedding,vector-config={dimension=${dimensions},flat}`,
+      "--async",
+      "--quiet",
+    ],
+    {
+      cwd: root,
+      env: process.env,
+      encoding: "utf8",
+      stdio: ["ignore", "inherit", "pipe"],
+    },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    if (isAlreadyExistsError(result.stderr)) {
+      console.log(`Reusing the ${dimensions}-dimension Memory vector index.`);
+      return;
+    }
+    if (result.stderr) process.stderr.write(result.stderr);
+    throw new Error(`${path.basename(gcloud)} firestore failed.`);
+  }
   console.log(
     "Memory vector index creation started; bounded fallback retrieval remains available while it builds.",
   );
