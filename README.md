@@ -60,6 +60,16 @@ npm run dev
 
 Then open <http://127.0.0.1:3000/>.
 
+To add two zero-cost local Insight Diff conversations for visual testing, run:
+
+```bash
+npm run seed:insight-diff-demo
+```
+
+The command replaces only earlier local demo conversations and never calls a
+model or web-search provider. One conversation contains Changed, New,
+Contradicted, and Stale claims; the other shows No material changes detected.
+
 The local API runs at <http://127.0.0.1:8000/>. Conversation data is written to
 `work/local-data/conversations.json`; research checkpoints are written to
 `work/local-data/research-jobs.json`; Memory Ledger entries are written to

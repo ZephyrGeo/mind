@@ -9,7 +9,9 @@ const React = require("react");
 const {
   MarkdownContent,
   applyCitationLinks,
+  buildCitationView,
   dedupeAdjacentLinks,
+  stripTrailingSourceSection,
 } = require("../frontend/markdown.cjs");
 
 test("research Markdown renders structure and safe external links", () => {
@@ -66,5 +68,95 @@ test("plain citation spans receive a safe clickable marker", () => {
       { url: "javascript:alert(1)", start_index: 4, end_index: 25 },
     ]),
     content,
+  );
+});
+
+test("research change annotations stay attached to matching report sections", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(MarkdownContent, {
+      content: "## Aurora release\n\nThe launch is now planned for Q4.",
+      headingAnnotations: [
+        {
+          id: "change-1",
+          kind: "changed",
+          section: "Aurora release",
+          baseline_claim: "The launch was planned for Q3.",
+          latest_claim: "The launch is now planned for Q4.",
+          baseline_evidence: [
+            {
+              source_id: "S4",
+              title: "Earlier filing",
+              url: "https://example.com/earlier",
+            },
+          ],
+          latest_evidence: [
+            {
+              source_id: "S18",
+              title: "Latest filing",
+              url: "https://example.com/latest",
+            },
+          ],
+          confidence: 0.92,
+        },
+      ],
+    }),
+  );
+
+  assert.match(html, /research-annotated-heading/);
+  assert.match(html, /Changed · 92%/);
+  assert.match(html, /Previously/);
+  assert.match(html, /The launch was planned for Q3/);
+  assert.match(html, /The launch is now planned for Q4/);
+  assert.match(html, /https:\/\/example\.com\/earlier/);
+  assert.match(html, /https:\/\/example\.com\/latest/);
+  assert.doesNotMatch(html, /Aug|2026-08/);
+});
+
+test("research source view keeps cited sources only and renumbers them", () => {
+  const content = [
+    "## Finding",
+    "",
+    "First fact [S20]. Second fact [S53]. Duplicate [S58].",
+    "",
+    "## Sources",
+    "",
+    "- [S20] old generated list",
+  ].join("\n");
+  const sources = [
+    { id: "S1", title: "Unused", url: "https://unused.example.com" },
+    { id: "S20", title: "Primary", url: "https://example.com/primary" },
+    { id: "S53", title: "Second", url: "https://example.com/second" },
+    {
+      id: "S58",
+      title: "Primary duplicate",
+      url: "https://www.example.com/primary?utm_source=search",
+    },
+  ];
+  const citations = [
+    { source_id: "S1", title: "Unused", url: sources[0].url },
+    { source_id: "S20", title: "Primary", url: sources[1].url },
+    { source_id: "S53", title: "Second", url: sources[2].url },
+    { source_id: "S58", title: "Primary duplicate", url: sources[3].url },
+  ];
+
+  const view = buildCitationView(content, sources, citations);
+
+  assert.equal(view.content, [
+    "## Finding",
+    "",
+    "First fact [S1]. Second fact [S2]. Duplicate [S1].",
+  ].join("\n"));
+  assert.deepEqual(
+    view.sources.map((source) => source.id),
+    ["S1", "S2"],
+  );
+  assert.equal(view.citations.length, 3);
+  assert.equal(view.idMap.get("S58"), "S1");
+});
+
+test("generated trailing source sections are removed from reports", () => {
+  assert.equal(
+    stripTrailingSourceSection("## Finding\n\nAnswer.\n\n## Sources\n\n- [S1]"),
+    "## Finding\n\nAnswer.",
   );
 });

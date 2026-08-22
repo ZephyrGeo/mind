@@ -6,6 +6,9 @@ const h = React.createElement;
 const BLOCK_PATTERN = /^(?:#{1,6}\s+|```|>\s?|\s*(?:[-+*]|\d+\.)\s+)/;
 const INLINE_PATTERN = /(\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|<https?:\/\/[^>\s]+>|https?:\/\/[^\s<]+|`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*| {2,}\n)/g;
 const ADJACENT_LINK_PATTERN = /<(https?:\/\/[^>\s]+)>\s+\(\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)\)/g;
+const SOURCE_MARKER_PATTERN = /\[((?:S|F)\d+)\]/g;
+const SOURCE_SECTION_PATTERN =
+  /^#{1,6}\s*(?:sources?|references|来源|参考资料|参考文献)\s*$/i;
 
 function safeWebUrl(value) {
   try {
@@ -22,6 +25,18 @@ function comparableUrl(value) {
   const url = new URL(safeUrl);
   const hostname = url.hostname.toLowerCase().replace(/^www\./, "");
   let pathname = url.pathname.replace(/\/+$/, "") || "/";
+  url.hash = "";
+  for (const key of [...url.searchParams.keys()]) {
+    if (
+      key.toLowerCase().startsWith("utm_") ||
+      ["fbclid", "gclid", "mc_cid", "mc_eid", "ref", "source"].includes(
+        key.toLowerCase(),
+      )
+    ) {
+      url.searchParams.delete(key);
+    }
+  }
+  url.searchParams.sort();
 
   if (hostname === "developers.openai.com") {
     pathname = pathname.replace(/^\/api\/docs(?=\/|$)/, "/docs");
@@ -33,6 +48,117 @@ function comparableUrl(value) {
     return `openai-docs:${pathname}${url.search}`;
   }
   return `${hostname}:${pathname}${url.search}`;
+}
+
+function stripTrailingSourceSection(markdown) {
+  if (!markdown) return "";
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const sourceHeading = lines.findIndex((line) =>
+    SOURCE_SECTION_PATTERN.test(line.trim()),
+  );
+  return (sourceHeading < 0 ? lines : lines.slice(0, sourceHeading))
+    .join("\n")
+    .trimEnd();
+}
+
+function buildCitationView(content, sources = [], citations = []) {
+  const report = stripTrailingSourceSection(content);
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  const citationById = new Map();
+  for (const citation of citations) {
+    if (!citationById.has(citation.source_id)) {
+      citationById.set(citation.source_id, citation);
+    }
+  }
+
+  const idMap = new Map();
+  const canonicalIds = new Map();
+  const displayRecords = new Map();
+  let webIndex = 0;
+  let fileIndex = 0;
+
+  function assign(sourceId) {
+    if (idMap.has(sourceId)) return idMap.get(sourceId);
+    const source = sourceById.get(sourceId);
+    const citation = citationById.get(sourceId);
+    const isFile = citation?.kind === "file" || sourceId.startsWith("F");
+    const url = source?.url ?? citation?.url ?? null;
+    const canonical = !isFile && url ? comparableUrl(url) : null;
+    if (canonical && canonicalIds.has(canonical)) {
+      const existing = canonicalIds.get(canonical);
+      idMap.set(sourceId, existing);
+      return existing;
+    }
+
+    const displayId = isFile ? `F${++fileIndex}` : `S${++webIndex}`;
+    idMap.set(sourceId, displayId);
+    if (canonical) canonicalIds.set(canonical, displayId);
+    displayRecords.set(displayId, {
+      ...(source ?? {}),
+      id: displayId,
+      source_id: displayId,
+      title: source?.title ?? citation?.title ?? sourceId,
+      url,
+      kind: isFile ? "file" : "web",
+      file_id: citation?.file_id,
+      verification_status: citation?.verification_status,
+    });
+    return displayId;
+  }
+
+  const reportMarkers = [
+    ...report.matchAll(new RegExp(SOURCE_MARKER_PATTERN.source, "g")),
+  ];
+  for (const match of reportMarkers) {
+    assign(match[1]);
+  }
+  if (!reportMarkers.length) {
+    for (const citation of [...citations].sort(
+      (left, right) => (left.start_index ?? 0) - (right.start_index ?? 0),
+    )) {
+      assign(citation.source_id);
+    }
+  }
+
+  const displayContent = report.replace(
+    new RegExp(SOURCE_MARKER_PATTERN.source, "g"),
+    (_marker, sourceId) => `[${assign(sourceId)}]`,
+  );
+  const displayCitations = [];
+  const markerMatches = [
+    ...displayContent.matchAll(new RegExp(SOURCE_MARKER_PATTERN.source, "g")),
+  ];
+  if (markerMatches.length) {
+    for (const match of markerMatches) {
+      const record = displayRecords.get(match[1]);
+      if (!record) continue;
+      displayCitations.push({
+        source_id: match[1],
+        title: record.title,
+        url: record.url,
+        file_id: record.file_id,
+        kind: record.kind,
+        verification_status: record.verification_status,
+        start_index: match.index,
+        end_index: match.index + match[0].length,
+      });
+    }
+  } else {
+    for (const citation of citations) {
+      const displayId = idMap.get(citation.source_id);
+      if (!displayId) continue;
+      displayCitations.push({ ...citation, source_id: displayId });
+    }
+  }
+
+  return {
+    content: displayContent,
+    citations: displayCitations,
+    sources: [...displayRecords.values()].filter(
+      (source) => source.kind !== "file",
+    ),
+    idMap,
+  };
 }
 
 function dedupeAdjacentLinks(markdown) {
@@ -187,11 +313,89 @@ function collectList(lines, startIndex, ordered) {
   return { items, nextIndex: index };
 }
 
-function renderBlocks(markdown) {
+function normalizeHeading(value) {
+  return value
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`#]/g, "")
+    .replace(/^\s*\d+[.)]\s*/, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .toLocaleLowerCase();
+}
+
+function renderEvidenceLinks(evidence = [], keyPrefix) {
+  if (!evidence.length) return null;
+  return h(
+    "span",
+    { className: "research-claim-evidence" },
+    evidence.map((item, index) =>
+      item.url
+        ? h(
+            ExternalLink,
+            { href: item.url, key: `${keyPrefix}-${index}` },
+            item.source_id,
+          )
+        : h("span", { key: `${keyPrefix}-${index}` }, item.source_id),
+    ),
+  );
+}
+
+function renderHeadingAnnotation(annotation, key) {
+  if (!annotation) return null;
+  const confidence = Math.round((annotation.confidence ?? 0) * 100);
+  const label = `${annotation.kind[0].toUpperCase()}${annotation.kind.slice(1)}`;
+  return h(
+    "span",
+    {
+      className: "research-diff-badge",
+      "data-kind": annotation.kind,
+      key,
+    },
+    h("i", { "aria-hidden": "true" }),
+    `${label} · ${confidence}%`,
+  );
+}
+
+function renderClaimComparison(annotation, key) {
+  if (
+    !annotation ||
+    !["changed", "contradicted"].includes(annotation.kind) ||
+    !annotation.baseline_claim ||
+    !annotation.latest_claim
+  ) {
+    return null;
+  }
+  return h(
+    "div",
+    {
+      className: "research-claim-comparison",
+      "data-kind": annotation.kind,
+      key,
+    },
+    h(
+      "div",
+      null,
+      h("span", null, "Previously"),
+      h("p", null, annotation.baseline_claim),
+      renderEvidenceLinks(annotation.baseline_evidence, `${key}-baseline`),
+    ),
+    h(
+      "div",
+      null,
+      h("span", null, annotation.kind === "contradicted" ? "Current evidence" : "Now"),
+      h("p", null, annotation.latest_claim),
+      renderEvidenceLinks(annotation.latest_evidence, `${key}-latest`),
+    ),
+  );
+}
+
+function renderBlocks(markdown, options = {}) {
+  const headingAnnotations = options.headingAnnotations ?? [];
   const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
   const blocks = [];
   let index = 0;
   let blockIndex = 0;
+  let pendingComparison = null;
 
   while (index < lines.length) {
     const line = lines[index];
@@ -227,9 +431,24 @@ function renderBlocks(markdown) {
 
     const heading = line.match(/^(#{1,6})\s+(.+)$/);
     if (heading) {
-      blocks.push(
-        h(`h${heading[1].length}`, { key }, renderInline(heading[2], key)),
+      const normalized = normalizeHeading(heading[2]);
+      const annotation = headingAnnotations.find(
+        (item) => normalizeHeading(item.section ?? "") === normalized,
       );
+      blocks.push(
+        h(
+          `h${heading[1].length}`,
+          {
+            className: annotation ? "research-annotated-heading" : undefined,
+            key,
+          },
+          annotation
+            ? h("span", null, renderInline(heading[2], key))
+            : renderInline(heading[2], key),
+          renderHeadingAnnotation(annotation, `${key}-badge`),
+        ),
+      );
+      pendingComparison = annotation;
       index += 1;
       blockIndex += 1;
       continue;
@@ -260,7 +479,13 @@ function renderBlocks(markdown) {
         quoteLines.push(lines[index].replace(/^>\s?/, ""));
         index += 1;
       }
-      blocks.push(h("blockquote", { key }, renderBlocks(quoteLines.join("\n"))));
+      blocks.push(
+        h(
+          "blockquote",
+          { key },
+          renderBlocks(quoteLines.join("\n"), options),
+        ),
+      );
       blockIndex += 1;
       continue;
     }
@@ -278,24 +503,32 @@ function renderBlocks(markdown) {
     blocks.push(
       h("p", { key }, renderInline(paragraphLines.join("\n"), key)),
     );
+    const comparison = renderClaimComparison(
+      pendingComparison,
+      `${key}-comparison`,
+    );
+    if (comparison) blocks.push(comparison);
+    pendingComparison = null;
     blockIndex += 1;
   }
   return blocks;
 }
 
-function MarkdownContent({ content, citations = [] }) {
+function MarkdownContent({ content, citations = [], headingAnnotations = [] }) {
   const citedMarkdown = applyCitationLinks(content, citations);
   return h(
     "div",
     { className: "markdown-content" },
-    renderBlocks(dedupeAdjacentLinks(citedMarkdown)),
+    renderBlocks(dedupeAdjacentLinks(citedMarkdown), { headingAnnotations }),
   );
 }
 
 module.exports = {
   MarkdownContent,
   applyCitationLinks,
+  buildCitationView,
   dedupeAdjacentLinks,
   renderBlocks,
   safeWebUrl,
+  stripTrailingSourceSection,
 };

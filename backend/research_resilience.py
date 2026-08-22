@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from enum import Enum
 
 
+MAX_RETRY_DELAY_SECONDS = 30.0
+MAX_RATE_LIMIT_WAIT_SECONDS = 90.0
+
+
 class RecoveryAction(str, Enum):
     RETRY_SAME_RESPONSE = "retry_same_response"
     RETRY_START = "retry_start"
@@ -39,6 +43,12 @@ _TERMINAL_ERRORS = {
 }
 
 
+def is_terminal_research_failure(code: str | None) -> bool:
+    """Return whether a provider-neutral failure must stop the whole job."""
+
+    return code in _TERMINAL_ERRORS
+
+
 def classify_research_failure(
     *,
     code: str,
@@ -48,7 +58,7 @@ def classify_research_failure(
 ) -> RecoveryDecision:
     """Choose recovery without exposing or depending on a concrete provider."""
 
-    if code in _TERMINAL_ERRORS:
+    if is_terminal_research_failure(code):
         return RecoveryDecision(RecoveryAction.TERMINAL, code)
     if code == "research_rate_limited":
         return RecoveryDecision(
@@ -75,7 +85,7 @@ def retry_delay_seconds(
     attempt: int,
     *,
     base_seconds: float,
-    cap_seconds: float = 30.0,
+    cap_seconds: float = MAX_RETRY_DELAY_SECONDS,
     retry_after_seconds: float | None = None,
     jitter_key: str = "",
 ) -> float:

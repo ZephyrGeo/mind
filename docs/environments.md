@@ -88,7 +88,7 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_RESEARCH_JOB_TIMEOUT_SECONDS` | `600` | Hard Harness deadline; remaining active Responses are cancelled when exceeded |
 | `MIND_RESEARCH_MAX_CONCURRENT_SEARCHES` | `2` | Maximum search Responses running concurrently within one Research Job |
 | `MIND_RESEARCH_MAX_TRANSPORT_RETRIES` | `5` | Consecutive retry ceiling for transient retrieval and transport failures |
-| `MIND_RESEARCH_MAX_RATE_LIMIT_RETRIES` | `3` | Retry ceiling for provider-neutral too-many-requests backoff |
+| `MIND_RESEARCH_MAX_RATE_LIMIT_RETRIES` | `3` | Retry ceiling for provider-neutral too-many-requests backoff; each wait is capped at 30 seconds and cumulative automatic waiting at 90 seconds |
 | `MIND_RESEARCH_MAX_STAGE_ATTEMPTS` | `2` | Maximum generated Responses for a stage after bounded structural/context recovery |
 | `MIND_RESEARCH_RETRY_BASE_SECONDS` | `2` | Initial exponential retry delay; later retries cap at 30 seconds |
 | `MIND_RESEARCH_MAX_EVIDENCE_CHARACTERS` | `60000` | Maximum verification/synthesis evidence packet before deterministic truncation |

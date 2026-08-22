@@ -1204,6 +1204,64 @@ def create_app(
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                "X-Research-Job-ID": str(job.id),
+            },
+        )
+
+    @application.post(
+        "/api/research/{job_id}/compare",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": (
+                    "Freeze a completed report and compare it with newly "
+                    "collected evidence as SSE."
+                ),
+                "content": {"text/event-stream": {}},
+            },
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+        },
+        tags=["research"],
+        operation_id="compareResearchWithLatestEvidence",
+    )
+    async def compare_research(
+        job_id: uuid.UUID,
+        principal: Principal,
+        request: Request,
+    ) -> StreamingResponse:
+        try:
+            job = research_service.start_comparison(job_id, principal.user_id)
+        except ResearchJobNotFoundError:
+            raise APIError(
+                status_code=404,
+                code="research_job_not_found",
+                message="Research job does not exist for this user.",
+            ) from None
+        except ResearchJobConflictError as error:
+            raise APIError(
+                status_code=409,
+                code="research_job_conflict",
+                message=str(error),
+            ) from None
+        request_id = _request_id(request)
+
+        def research_events() -> Iterator[str]:
+            for event in research_service.stream_job(
+                job.id,
+                principal.user_id,
+                request_id=request_id,
+            ):
+                yield _sse_event(event)
+
+        return StreamingResponse(
+            research_events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Research-Job-ID": str(job.id),
             },
         )
 
@@ -1266,6 +1324,7 @@ def create_app(
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                "X-Research-Job-ID": str(job.id),
             },
         )
 

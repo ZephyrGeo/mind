@@ -201,6 +201,7 @@ class MockResearchProvider:
         self.incomplete_once_for_kind: str | None = None
         self.invalid_output_once_for_kind: str | None = None
         self.permanently_fail_first_search = False
+        self.search_failure_code: str | None = None
         self.failing_search_prompt: str | None = None
         self.active_response_ids: set[str] = set()
         self.max_active_responses = 0
@@ -208,6 +209,7 @@ class MockResearchProvider:
         self.search_tool_call_count = 1
         self.search_tool_call_counts: list[int] = []
         self.synthesis_outputs: list[str] = []
+        self.comparison_outputs: list[str] = []
         self.file_analysis_output: str | None = None
 
     def start(self, request: ResearchProviderRequest) -> Mapping[str, object]:
@@ -305,6 +307,29 @@ class MockResearchProvider:
                     }
                 ),
             )
+        elif request.task_kind == "compare":
+            completed = completed_text_response(
+                response_id,
+                self.comparison_outputs.pop(0)
+                if self.comparison_outputs
+                else json.dumps(
+                    {
+                        "claims": [
+                            {
+                                "id": "change-1",
+                                "kind": "changed",
+                                "section": "Research summary",
+                                "baseline_claim": "The earlier report supported the result.",
+                                "latest_claim": "The latest evidence supports a revised result.",
+                                "baseline_source_ids": ["S1"],
+                                "latest_source_ids": ["S1"],
+                                "confidence": 0.92,
+                                "rationale": "The latest evidence replaces the earlier conclusion.",
+                            }
+                        ]
+                    }
+                ),
+            )
         elif request.task_kind in {"synthesis", "citation_repair"}:
             output_text = (
                 self.synthesis_outputs.pop(0)
@@ -316,7 +341,14 @@ class MockResearchProvider:
                 output_text,
             )
         else:
-            if self.permanently_fail_first_search and (
+            if self.search_failure_code:
+                completed = {
+                    "id": response_id,
+                    "status": "failed",
+                    "error": {"code": self.search_failure_code},
+                    "output": [],
+                }
+            elif self.permanently_fail_first_search and (
                 self.failing_search_prompt is None
                 or self.failing_search_prompt == request.prompt
             ):
@@ -1047,6 +1079,10 @@ class MindFastAPIContractTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         events = parse_sse(response.text)
+        self.assertEqual(
+            response.headers["X-Research-Job-ID"],
+            events[0]["job_id"],
+        )
         event_types = [event["type"] for event in events]
         self.assertEqual(event_types[0], "research_started")
         self.assertIn("source", event_types)
@@ -1112,6 +1148,113 @@ class MindFastAPIContractTest(unittest.TestCase):
             str(conversation.messages[-1].research_job_id),
             job_id,
         )
+
+    def test_research_comparison_preserves_snapshots_and_structured_diff(
+        self,
+    ) -> None:
+        self.research_provider.synthesis_outputs = [
+            "## Research summary\n\nThe baseline result is supported [S1].",
+            "## Research summary\n\nThe latest result is supported [S1].",
+        ]
+        baseline_response = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Track how the evidence changes over time."},
+        )
+        baseline_events = parse_sse(baseline_response.text)
+        baseline_job_id = baseline_events[0]["job_id"]
+
+        comparison_response = self.client.post(
+            f"/api/research/{baseline_job_id}/compare",
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(comparison_response.status_code, 200)
+        comparison_events = parse_sse(comparison_response.text)
+        self.assertEqual(
+            comparison_response.headers["X-Research-Job-ID"],
+            comparison_events[0]["job_id"],
+        )
+        self.assertEqual(comparison_events[-1]["type"], "done")
+        self.assertEqual(
+            comparison_events[-1]["baseline_job_id"],
+            baseline_job_id,
+        )
+        comparison_job_id = comparison_events[0]["job_id"]
+        comparison = self.client.get(
+            f"/api/research/{comparison_job_id}",
+            headers=self.auth_headers,
+        ).json()
+        self.assertEqual(comparison["status"], "completed")
+        self.assertEqual(comparison["baseline_job_id"], baseline_job_id)
+        self.assertEqual(
+            comparison["checkpoint"]["baseline_snapshot"]["job_id"],
+            baseline_job_id,
+        )
+        self.assertIn(
+            "baseline result",
+            comparison["checkpoint"]["baseline_snapshot"]["report"],
+        )
+        self.assertIn(
+            "latest result",
+            comparison["checkpoint"]["report"],
+        )
+        claims = comparison["checkpoint"]["insight_diff"]["claims"]
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]["kind"], "changed")
+        self.assertEqual(claims[0]["confidence"], 0.92)
+        self.assertTrue(claims[0]["baseline_evidence"])
+        self.assertTrue(claims[0]["latest_evidence"])
+        self.assertIn(
+            "IMMUTABLE BASELINE COMPARISON",
+            next(
+                call.prompt
+                for call in self.research_provider.start_calls
+                if call.task_kind == "synthesis"
+                and "IMMUTABLE BASELINE COMPARISON" in call.prompt
+            ),
+        )
+
+        conversation = self.repository.get_conversation(
+            comparison_events[-1]["conversation_id"],
+            "local-developer",
+        )
+        self.assertEqual(
+            [message.role for message in conversation.messages],
+            [
+                MessageRole.USER,
+                MessageRole.ASSISTANT,
+                MessageRole.USER,
+                MessageRole.ASSISTANT,
+            ],
+        )
+        self.assertEqual(
+            conversation.messages[-2].content,
+            "Compare this report with the latest evidence.",
+        )
+
+    def test_research_comparison_accepts_no_material_changes(self) -> None:
+        self.research_provider.synthesis_outputs = [
+            "## Research summary\n\nThe result remains supported [S1].",
+            "## Research summary\n\nThe result remains supported [S1].",
+        ]
+        self.research_provider.comparison_outputs = [json.dumps({"claims": []})]
+        baseline = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Confirm whether the evidence changed."},
+        )
+        baseline_job_id = parse_sse(baseline.text)[0]["job_id"]
+
+        comparison = self.client.post(
+            f"/api/research/{baseline_job_id}/compare",
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(comparison.status_code, 200)
+        events = parse_sse(comparison.text)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(events[-1]["insight_diff"]["claims"], [])
 
     def test_research_persists_and_uses_relevant_confirmed_memory(self) -> None:
         memory = self.memory_service.create_memory(
@@ -1418,6 +1561,60 @@ class MindFastAPIContractTest(unittest.TestCase):
             len(self.research_provider.start_calls) + 1,
         )
         self.assertLessEqual(self.research_provider.max_active_responses, 2)
+
+    def test_repeated_rate_limits_pause_research_for_manual_resume(self) -> None:
+        self.research_provider.rate_limit_start_failures = 4
+
+        response = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Pause after repeated request limits."},
+        )
+
+        events = parse_sse(response.text)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(events[-1]["code"], "research_rate_limited")
+        self.assertEqual(
+            events[-1]["message"],
+            "Too many requests. Research is paused. Resume to try again.",
+        )
+        self.assertEqual(self.research_provider.start_attempts, 4)
+
+    def test_quota_exhaustion_stops_without_retrying_as_partial_evidence(
+        self,
+    ) -> None:
+        self.research_provider.search_failure_code = "credit_balance_exhausted"
+
+        response = self.client.post(
+            "/api/research",
+            headers=self.auth_headers,
+            json={"query": "Stop immediately when Research quota is exhausted."},
+        )
+
+        events = parse_sse(response.text)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(events[-1]["code"], "research_quota_exhausted")
+        self.assertFalse(events[-1]["retryable"])
+        self.assertEqual(
+            events[-1]["message"],
+            "Research usage is unavailable because its quota is exhausted.",
+        )
+        self.assertNotIn(
+            "research_insufficient_evidence",
+            [event.get("code") for event in events],
+        )
+        job = self.research_repository.get_job(
+            uuid.UUID(events[0]["job_id"]),
+            "local-developer",
+        )
+        self.assertEqual(job.degraded_reasons, [])
+        search_calls = [
+            call
+            for call in self.research_provider.start_calls
+            if call.task_kind == "search"
+        ]
+        self.assertLessEqual(len(search_calls), 2)
+        self.assertTrue(self.research_provider.cancel_calls)
 
     def test_one_failed_search_degrades_instead_of_failing_the_report(
         self,
@@ -2312,6 +2509,14 @@ class MindFastAPIContractTest(unittest.TestCase):
         self.assertIn("/api/chat", schema["paths"])
         self.assertIn("/api/research", schema["paths"])
         self.assertIn("/api/research/{job_id}", schema["paths"])
+        self.assertIn(
+            "/api/research/{job_id}/compare",
+            schema["paths"],
+        )
+        self.assertIn(
+            "/api/research/{job_id}/cancel",
+            schema["paths"],
+        )
         self.assertIn("/api/memories", schema["paths"])
         self.assertIn("/api/memories/{memory_id}", schema["paths"])
         self.assertIn("/api/memories/{memory_id}/confirm", schema["paths"])
@@ -2672,6 +2877,48 @@ class OpenAIResearchProviderTest(unittest.TestCase):
         self.assertEqual(context.exception.retry_after_seconds, 7)
         self.assertTrue(context.exception.retryable)
         self.assertNotIn("OpenAI", context.exception.public_message)
+
+    def test_failed_background_response_maps_exhausted_credit_to_quota(
+        self,
+    ) -> None:
+        provider = OpenAIResearchProvider(api_key="test-key")
+
+        result = provider.parse_result(
+            {
+                "id": "resp_no_credit",
+                "status": "failed",
+                "error": {"code": "credit_balance_exhausted"},
+                "output": [],
+            }
+        )
+
+        self.assertEqual(result.error_code, "research_quota_exhausted")
+        self.assertFalse(result.retryable)
+
+    def test_http_credit_error_maps_to_non_retryable_quota_failure(self) -> None:
+        def opener(request: Request, *, timeout: float) -> StubJsonResponse:
+            del timeout
+            raise HTTPError(
+                request.full_url,
+                402,
+                "Payment Required",
+                {},
+                BytesIO(
+                    json.dumps(
+                        {"error": {"code": "credit_balance_exhausted"}}
+                    ).encode()
+                ),
+            )
+
+        provider = OpenAIResearchProvider(api_key="test-key", opener=opener)
+
+        with self.assertRaises(ResearchProviderError) as context:
+            provider.start(
+                ResearchProviderRequest(prompt="test", task_kind="search")
+            )
+
+        self.assertEqual(context.exception.code, "research_quota_exhausted")
+        self.assertFalse(context.exception.retryable)
 
     def test_context_limit_is_classified_for_bounded_stage_retry(self) -> None:
         def opener(request: Request, *, timeout: float) -> StubJsonResponse:

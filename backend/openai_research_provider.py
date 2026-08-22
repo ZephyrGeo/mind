@@ -313,6 +313,16 @@ def _response_failure(
     error = response.get("error")
     error_payload = _object_mapping(error)
     provider_code = error_payload.get("code") if error_payload else None
+    if provider_code in {
+        "credit_balance_exhausted",
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+    }:
+        return (
+            "research_quota_exhausted",
+            "Research usage is unavailable because its quota is exhausted.",
+            False,
+        )
     if status in {"cancelled", "canceled"}:
         return "research_cancelled", "Research was cancelled.", False
     if status == "incomplete":
@@ -358,6 +368,17 @@ def _http_error(error: HTTPError, *, path: str) -> ResearchProviderError:
     status_code = error.code
     provider_code = _http_provider_code(error)
     retry_after_seconds = _retry_after_seconds(error)
+    if provider_code in {
+        "credit_balance_exhausted",
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+    }:
+        return ResearchProviderError(
+            "research_quota_exhausted",
+            "Research usage is unavailable because the configured quota is exhausted.",
+            retryable=False,
+            provider_status_code=status_code,
+        )
     if status_code in {401, 403}:
         return ResearchProviderError(
             "research_authentication_failed",
@@ -380,13 +401,6 @@ def _http_error(error: HTTPError, *, path: str) -> ResearchProviderError:
             provider_status_code=status_code,
         )
     if status_code == 429:
-        if provider_code in {"insufficient_quota", "billing_hard_limit_reached"}:
-            return ResearchProviderError(
-                "research_quota_exhausted",
-                "Research usage is unavailable because the configured quota is exhausted.",
-                retryable=False,
-                provider_status_code=status_code,
-            )
         return ResearchProviderError(
             "research_rate_limited",
             "Too many requests. Research will continue shortly.",

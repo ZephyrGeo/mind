@@ -35,6 +35,7 @@ class ResearchStatus(str, Enum):
     PLANNING = "planning"
     COLLECTING = "collecting"
     VERIFYING = "verifying"
+    COMPARING = "comparing"
     SYNTHESIZING = "synthesizing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -55,6 +56,7 @@ class ResearchTaskKind(str, Enum):
     FILE_ANALYSIS = "file_analysis"
     SEARCH = "search"
     VERIFY = "verify"
+    COMPARE = "compare"
     SYNTHESIS = "synthesis"
     CITATION_REPAIR = "citation_repair"
 
@@ -129,6 +131,13 @@ class ResearchEvidenceStatus(str, Enum):
     CORROBORATED = "corroborated"
     CONFLICT = "conflict"
     UNVERIFIED = "unverified"
+
+
+class ResearchDiffKind(str, Enum):
+    CHANGED = "changed"
+    NEW = "new"
+    CONTRADICTED = "contradicted"
+    STALE = "stale"
 
 
 class User(StrictModel):
@@ -262,6 +271,66 @@ class ResearchCitation(StrictModel):
         return self
 
 
+class ResearchDiffEvidence(StrictModel):
+    source_id: str = Field(min_length=1, max_length=32)
+    title: str = Field(min_length=1, max_length=1_000)
+    url: str | None = Field(default=None, max_length=4_096)
+    published_at: str | None = Field(default=None, max_length=128)
+
+
+class ResearchDiffClaim(StrictModel):
+    id: str = Field(min_length=1, max_length=64)
+    kind: ResearchDiffKind
+    section: str = Field(min_length=1, max_length=500)
+    baseline_claim: str | None = Field(default=None, max_length=4_000)
+    latest_claim: str | None = Field(default=None, max_length=4_000)
+    baseline_evidence: list[ResearchDiffEvidence] = Field(
+        default_factory=list[ResearchDiffEvidence],
+        max_length=20,
+    )
+    latest_evidence: list[ResearchDiffEvidence] = Field(
+        default_factory=list[ResearchDiffEvidence],
+        max_length=20,
+    )
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    rationale: str = Field(default="", max_length=2_000)
+
+    @model_validator(mode="after")
+    def validate_claim_sides(self) -> "ResearchDiffClaim":
+        if self.kind == ResearchDiffKind.NEW and not self.latest_claim:
+            raise ValueError("New Research changes require a latest claim.")
+        if self.kind == ResearchDiffKind.STALE and not self.baseline_claim:
+            raise ValueError("Stale Research changes require a baseline claim.")
+        if self.kind in {
+            ResearchDiffKind.CHANGED,
+            ResearchDiffKind.CONTRADICTED,
+        } and not (self.baseline_claim and self.latest_claim):
+            raise ValueError(
+                "Changed and contradicted Research changes require both claim sides."
+            )
+        return self
+
+
+class ResearchInsightDiff(StrictModel):
+    baseline_job_id: UUID
+    baseline_created_at: datetime
+    latest_created_at: datetime = Field(default_factory=utc_now)
+    claims: list[ResearchDiffClaim] = Field(
+        default_factory=list[ResearchDiffClaim],
+        max_length=100,
+    )
+
+
+class ResearchReportSnapshot(StrictModel):
+    job_id: UUID
+    created_at: datetime
+    report: str
+    sources: list[ResearchSource] = Field(default_factory=list[ResearchSource])
+    citations: list[ResearchCitation] = Field(
+        default_factory=list[ResearchCitation]
+    )
+
+
 class ResearchBriefQuestion(StrictModel):
     id: str = Field(min_length=1, max_length=32)
     question: str = Field(min_length=1, max_length=1_000)
@@ -382,6 +451,8 @@ class ResearchCheckpoint(StrictModel):
     subtasks: list[ResearchSubtask] = Field(default_factory=list[ResearchSubtask])
     sources: list[ResearchSource] = Field(default_factory=list[ResearchSource])
     citations: list[ResearchCitation] = Field(default_factory=list[ResearchCitation])
+    baseline_snapshot: ResearchReportSnapshot | None = None
+    insight_diff: ResearchInsightDiff | None = None
     completed_step_ids: list[str] = Field(default_factory=list)
     report: str = ""
     assistant_message_id: UUID | None = None
@@ -392,6 +463,7 @@ class ResearchJob(StrictModel):
     user_id: str
     conversation_id: UUID
     query: str
+    baseline_job_id: UUID | None = None
     model: str = "gpt-5.6-terra"
     prompt_version: str = "research-harness-v3"
     status: ResearchStatus = ResearchStatus.QUEUED
@@ -407,6 +479,7 @@ class ResearchJob(StrictModel):
     soft_deadline_reached: bool = False
     provider_backoff_until: datetime | None = None
     rate_limit_count: int = Field(default=0, ge=0, le=100)
+    rate_limit_wait_seconds: float = Field(default=0, ge=0, le=3_600)
     context_reduction_level: int = Field(default=0, ge=0, le=2)
     degraded_reasons: list[str] = Field(default_factory=list[str], max_length=20)
     citation_coverage: float | None = Field(default=None, ge=0, le=1)

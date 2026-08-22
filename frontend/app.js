@@ -5,7 +5,7 @@ const { createRoot } = require("react-dom/client");
 const RadixSelect = require("@radix-ui/react-select");
 const RadixSwitch = require("@radix-ui/react-switch");
 const { createAuthService } = require("./auth.cjs");
-const { MarkdownContent } = require("./markdown.cjs");
+const { MarkdownContent, buildCitationView } = require("./markdown.cjs");
 
 const h = React.createElement;
 const { useEffect, useRef, useState } = React;
@@ -17,21 +17,15 @@ const authService = createAuthService(RUNTIME_CONFIG, LOCAL_TOKEN);
 
 const researchStatusLabels = {
   queued: "Queued",
-  planning: "Planning research",
+  planning: "Clarifying the Research Brief",
   collecting: "Searching sources",
   verifying: "Checking evidence",
+  comparing: "Comparing claims",
   synthesizing: "Writing report",
   completed: "Research complete",
   failed: "Research paused after an error",
   cancelled: "Research stopped",
 };
-
-const researchStages = [
-  { status: "planning", label: "Plan" },
-  { status: "collecting", label: "Search" },
-  { status: "verifying", label: "Verify" },
-  { status: "synthesizing", label: "Write" },
-];
 
 const navigation = [
   { icon: "diamond", label: "Memory", view: "memory" },
@@ -39,15 +33,29 @@ const navigation = [
 ];
 
 function routeFromLocation() {
-  const route = window.location.hash.replace(/^#\/?/, "").split("?")[0];
-  if (route === "memory") return { view: "memory", mode: "chat" };
-  if (route === "research") return { view: "chat", mode: "research" };
-  return { view: "chat", mode: "chat" };
+  const [route, encodedConversationId] = window.location.hash
+    .replace(/^#\/?/, "")
+    .split("?")[0]
+    .split("/");
+  const conversationId = encodedConversationId || null;
+  if (route === "memory") {
+    return { view: "memory", mode: "chat", conversationId: null };
+  }
+  if (route === "research") {
+    return { view: "chat", mode: "research", conversationId };
+  }
+  if (route === "chat") {
+    return { view: "chat", mode: "chat", conversationId };
+  }
+  return { view: "chat", mode: "chat", conversationId: null };
 }
 
-function routeHash(view, mode) {
+function routeHash(view, mode, conversationId = null) {
   if (view === "memory") return "#/memory";
-  return mode === "research" ? "#/research" : "#/chat";
+  const route = mode === "research" ? "research" : "chat";
+  return conversationId
+    ? `#/${route}/${encodeURIComponent(conversationId)}`
+    : `#/${route}`;
 }
 
 function researchRetrySnapshot(job) {
@@ -71,7 +79,10 @@ function researchRetrySnapshot(job) {
     retryAfterSeconds:
       nextRetryAt == null
         ? 0
-        : Math.max(0, Math.ceil((nextRetryAt - Date.now()) / 1000)),
+        : Math.min(
+            30,
+            Math.max(0, Math.ceil((nextRetryAt - Date.now()) / 1000)),
+          ),
   };
 }
 
@@ -557,22 +568,40 @@ function SuggestionList({ onSuggestion }) {
   );
 }
 
-function ResearchProgress({ research, onResume }) {
-  const [sourcesOpen, setSourcesOpen] = useState(false);
-  const [allSourcesOpen, setAllSourcesOpen] = useState(false);
-  if (!research) return null;
-  const progress = Math.round((research.progress ?? 0) * 100);
-  const canResume = ["failed", "cancelled"].includes(research.status);
-  const sources = research.sources ?? [];
-  const citations = research.citations ?? [];
+function researchCurrentStep(research) {
+  const explicit = Number(research.currentStep);
+  if (Number.isFinite(explicit)) return Math.min(6, Math.max(1, explicit));
+  return {
+    queued: 1,
+    planning: 2,
+    collecting: 3,
+    verifying: 4,
+    comparing: 5,
+    synthesizing: 6,
+    completed: 6,
+  }[research.status] ?? 1;
+}
+
+function formatResearchDate(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(parsed);
+}
+
+function researchSourceRows(sources = [], citations = []) {
   const sourceById = new Map(sources.map((source) => [source.id, source]));
-  const citedSourceIds = new Set();
-  const citedSourceRows = [];
+  const cited = [];
+  const seenCitations = new Set();
   for (const citation of citations) {
-    if (citedSourceIds.has(citation.source_id)) continue;
-    citedSourceIds.add(citation.source_id);
+    if (seenCitations.has(citation.source_id)) continue;
+    seenCitations.add(citation.source_id);
     const source = sourceById.get(citation.source_id);
-    citedSourceRows.push(
+    cited.push(
       citation.kind === "file"
         ? {
             kind: "file",
@@ -590,72 +619,13 @@ function ResearchProgress({ research, onResume }) {
           },
     );
   }
-  const allSourceRows = Array.from(
-    new Map(
-      [
-        ...sources.map((source) => ({
-          kind: "web",
-          source_id: source.id,
-          title: source.title,
-          url: source.url,
-          snippet: source.snippet,
-        })),
-        ...citedSourceRows,
-      ].map((source) => [source.source_id, source]),
-    ).values(),
-  );
-  const stageIndex = researchStages.findIndex(
-    (stage) => stage.status === research.status,
-  );
-  const currentStage = research.status === "queued" ? 0 : stageIndex;
-  const completedAll = research.status === "completed";
-  const keySourceRows = (
-    citedSourceRows.length ? citedSourceRows : allSourceRows
-  ).slice(0, 6);
-  const visibleSourceRows = allSourcesOpen ? allSourceRows : keySourceRows;
-  const active = !["completed", "failed", "cancelled"].includes(
-    research.status,
-  );
-  const taskSummary =
-    research.totalSubtasks > 0
-      ? `${research.completedSubtasks ?? 0}/${research.totalSubtasks} tasks`
-      : null;
-  const roundSummary =
-    research.searchRound > 0
-      ? `round ${research.searchRound}/${research.maxSearchRounds ?? 2}`
-      : null;
-  const toolSummary =
-    research.maxTotalToolCalls > 0
-      ? `${research.totalToolCalls ?? 0}/${research.maxTotalToolCalls} searches`
-      : null;
-  const hardMaxTotalToolCalls =
-    research.hardMaxTotalToolCalls ??
-    (research.maxTotalToolCalls ?? 0) + (research.maxToolCallOverrun ?? 0);
-  const hardBudgetReached =
-    research.hardBudgetReached ||
-    (hardMaxTotalToolCalls > 0 &&
-      (research.totalToolCalls ?? 0) >= hardMaxTotalToolCalls);
-  const budgetWarning = hardBudgetReached
-    ? `Research budget limit reached (${research.totalToolCalls ?? 0}/${hardMaxTotalToolCalls}); search stopped and synthesis is limited to the evidence collected.`
-    : research.budgetExceeded
-      ? `Used extra search budget (${research.totalToolCalls ?? 0}/${research.maxTotalToolCalls}); no new searches will be started.`
-      : null;
-  const qualityWarning = research.qualityWarning ?? null;
-  const retryAfterSeconds = Math.max(0, research.retryAfterSeconds ?? 0);
-  const recoveryNotice =
-    research.recoveryState === "rate_limited"
-      ? `Too many requests. Research will continue in ${retryAfterSeconds} seconds.`
-      : research.recoveryState === "retrying"
-        ? `Research is temporarily delayed. Retrying in ${retryAfterSeconds} seconds.`
-        : null;
-  const degradedNotice =
-    research.softDeadlineReached || (research.degradedReasons ?? []).length
-      ? "Research is continuing with partial evidence."
-      : null;
-  const progressNotice =
-    recoveryNotice ||
-    [budgetWarning, qualityWarning, degradedNotice].filter(Boolean).join(" ") ||
-    null;
+  return cited;
+}
+
+function ResearchSources({ sources = [], citations = [] }) {
+  const [open, setOpen] = useState(false);
+  const rows = researchSourceRows(sources, citations);
+  if (!rows.length) return null;
 
   function sourceRow(source) {
     if (source.kind === "file") {
@@ -704,7 +674,65 @@ function ResearchProgress({ research, onResume }) {
 
   return h(
     "section",
-    { className: "research-progress", "aria-label": "Research progress" },
+    { className: "research-sources" },
+    h(
+      "button",
+      {
+        className: "research-sources-toggle",
+        type: "button",
+        onClick: () => setOpen((current) => !current),
+        "aria-expanded": open,
+      },
+      h(Icon, { name: "books" }),
+      h("span", { className: "research-sources-label" }, "Sources"),
+      h(Icon, {
+        name: "caret-down",
+        className: `research-sources-caret${open ? " open" : ""}`,
+      }),
+    ),
+    open
+      ? h(
+          "div",
+          { className: "research-sources-panel" },
+          h(
+            "div",
+            { className: "research-source-list", role: "list" },
+            rows.map(sourceRow),
+          ),
+        )
+      : null,
+  );
+}
+
+function ResearchProgress({ research, onResume }) {
+  if (!research) return null;
+  const currentStep = researchCurrentStep(research);
+  const totalSteps = research.totalSteps ?? 6;
+  const completedAll = research.status === "completed";
+  const active = !["completed", "failed", "cancelled"].includes(research.status);
+  const canResume = ["failed", "cancelled"].includes(research.status);
+  const retryAfterSeconds = Math.min(
+    30,
+    Math.max(0, research.retryAfterSeconds ?? 0),
+  );
+  const recoveryNotice =
+    active && research.recoveryState === "rate_limited"
+      ? `Too many requests. Research will continue in ${retryAfterSeconds} seconds.`
+      : active && research.recoveryState === "retrying"
+        ? `Research is temporarily delayed. Retrying in ${retryAfterSeconds} seconds.`
+        : null;
+  const progressNotice =
+    recoveryNotice ||
+    [research.qualityWarning].filter(Boolean).join(" ") ||
+    null;
+
+  return h(
+    "section",
+    {
+      className: `research-progress${active ? " is-running" : ""}`,
+      "aria-label": "Research progress",
+      "aria-live": "polite",
+    },
     h(
       "div",
       { className: "research-progress-heading" },
@@ -712,56 +740,25 @@ function ResearchProgress({ research, onResume }) {
         "span",
         { className: `research-state ${research.status ?? "queued"}` },
         h(Icon, {
-          name:
-            research.status === "completed" ? "check-circle" : "spinner-gap",
+          name: completedAll ? "check-circle" : active ? "spinner-gap" : "warning-circle",
         }),
-        researchStatusLabels[research.status] ?? "Preparing research",
-      ),
-      h("span", null, `${progress}%`),
-    ),
-    h(
-      "div",
-      {
-        className: "research-progress-track",
-        role: "progressbar",
-        "aria-valuemin": 0,
-        "aria-valuemax": 100,
-        "aria-valuenow": progress,
-      },
-      h("span", { style: { width: `${progress}%` } }),
-    ),
-    h(
-      "ol",
-      { className: "research-stage-list", "aria-label": "Research stages" },
-      researchStages.map((stage, index) =>
         h(
-          "li",
-          {
-            key: stage.status,
-            className: `${
-              completedAll || index < currentStage
-                ? "completed"
-                : index === currentStage
-                  ? "active"
-                  : "pending"
-            }`,
-          },
-          h("span", null, index + 1),
-          stage.label,
+          "span",
+          { className: active ? "research-active-task" : null },
+          researchStatusLabels[research.status] ?? "Preparing research",
         ),
       ),
-    ),
-    h(
-      "div",
-      { className: "research-progress-meta" },
       h(
         "span",
-        null,
-        [roundSummary, taskSummary, toolSummary].filter(Boolean).join(" · ") ||
-          "Preparing the Research Brief",
+        { className: "research-progress-count" },
+        `${currentStep} / ${totalSteps} steps`,
       ),
-      progressNotice
-        ? h(
+    ),
+    progressNotice
+      ? h(
+          "div",
+          { className: "research-progress-meta" },
+          h(
             "span",
             {
               className: recoveryNotice
@@ -769,84 +766,7 @@ function ResearchProgress({ research, onResume }) {
                 : "research-budget-warning",
             },
             progressNotice,
-          )
-        : active
-          ? h("span", null, "This can take several minutes.")
-          : null,
-    ),
-    allSourceRows.length
-      ? h(
-          "section",
-          { className: "research-sources" },
-          h(
-            "button",
-            {
-              className: "research-sources-toggle",
-              type: "button",
-              onClick: () => {
-                if (sourcesOpen) setAllSourcesOpen(false);
-                setSourcesOpen((current) => !current);
-              },
-              "aria-expanded": sourcesOpen,
-            },
-            h(Icon, { name: "books" }),
-            h("span", { className: "research-sources-label" }, "Sources"),
-            h(
-              "span",
-              { className: "research-sources-count" },
-              allSourceRows.length,
-            ),
-            h(Icon, {
-              name: "caret-down",
-              className: `research-sources-caret${sourcesOpen ? " open" : ""}`,
-            }),
           ),
-          sourcesOpen
-            ? h(
-                "div",
-                { className: "research-sources-panel" },
-                completedAll
-                  ? [
-                      h(
-                        "div",
-                        { className: "research-sources-toolbar" },
-                        h(
-                          "span",
-                          null,
-                          citedSourceRows.length
-                            ? "Cited in report"
-                            : "Selected sources",
-                        ),
-                        allSourceRows.length > keySourceRows.length
-                          ? h(
-                              "button",
-                              {
-                                className: "research-sources-view-all",
-                                type: "button",
-                                onClick: () =>
-                                  setAllSourcesOpen((current) => !current),
-                              },
-                              allSourcesOpen
-                                ? "Show key sources"
-                                : `View all ${allSourceRows.length} sources`,
-                            )
-                          : null,
-                      ),
-                      h(
-                        "div",
-                        { className: "research-source-list", role: "list" },
-                        visibleSourceRows.map(sourceRow),
-                      ),
-                    ]
-                  : h(
-                      "p",
-                      { className: "research-sources-note" },
-                      active
-                        ? `${allSourceRows.length} sources collected. Key sources will appear with the report.`
-                        : `${allSourceRows.length} sources collected.`,
-                    ),
-              )
-            : null,
         )
       : null,
     canResume
@@ -866,7 +786,285 @@ function ResearchProgress({ research, onResume }) {
   );
 }
 
-function Message({ message, onResumeResearch }) {
+function DiffSummary({ claims, compared = false }) {
+  if (!claims.length) {
+    return compared
+      ? h(
+          "section",
+          {
+            className: "research-diff-summary empty",
+            "aria-label": "No changes from baseline",
+          },
+          h(Icon, { name: "check-circle" }),
+          h("strong", null, "No material changes detected"),
+        )
+      : null;
+  }
+  const kinds = ["changed", "new", "contradicted", "stale"];
+  const counts = Object.fromEntries(
+    kinds.map((kind) => [kind, claims.filter((claim) => claim.kind === kind).length]),
+  );
+  return h(
+    "section",
+    { className: "research-diff-summary", "aria-label": "Changes from baseline" },
+    h("strong", null, `${claims.length} changes from baseline`),
+    h(
+      "div",
+      { className: "research-diff-counts" },
+      kinds.map((kind) =>
+        h(
+          "span",
+          { key: kind, "data-kind": kind },
+          h("i", { "aria-hidden": "true" }),
+          `${kind[0].toUpperCase()}${kind.slice(1)} ${counts[kind]}`,
+        ),
+      ),
+    ),
+  );
+}
+
+function DiffEvidenceLinks({ evidence = [] }) {
+  if (!evidence.length) return null;
+  return h(
+    "span",
+    { className: "research-diff-evidence" },
+    evidence.map((item) =>
+      item.url
+        ? h(
+            "a",
+            {
+              href: item.url,
+              target: "_blank",
+              rel: "noreferrer noopener",
+              key: item.source_id,
+              title: item.title,
+            },
+            item.source_id,
+          )
+        : h("span", { key: item.source_id }, item.source_id),
+    ),
+  );
+}
+
+function StaleClaims({ claims }) {
+  const stale = claims.filter((claim) => claim.kind === "stale");
+  if (!stale.length) return null;
+  return h(
+    "details",
+    { className: "research-stale-claims" },
+    h(
+      "summary",
+      null,
+      h("span", null, "Stale baseline claims"),
+      h("small", null, stale.length),
+      h(
+        "span",
+        { className: "research-stale-confidence" },
+        `· ${Math.round(
+          (stale.reduce((total, claim) => total + (claim.confidence ?? 0), 0) /
+            stale.length) *
+            100,
+        )}% confidence`,
+      ),
+      h(Icon, { name: "caret-down" }),
+    ),
+    h(
+      "div",
+      { className: "research-stale-list" },
+      stale.map((claim) =>
+        h(
+          "article",
+          { key: claim.id },
+          h(
+            "div",
+            { className: "research-diff-badge", "data-kind": "stale" },
+            h("i", { "aria-hidden": "true" }),
+            `Stale · ${Math.round((claim.confidence ?? 0) * 100)}%`,
+          ),
+          h("strong", null, claim.section),
+          h("p", null, claim.baseline_claim),
+          h(DiffEvidenceLinks, { evidence: claim.baseline_evidence }),
+        ),
+      ),
+    ),
+  );
+}
+
+function ResearchReport({ content, research, onCompare, compareDisabled }) {
+  const [reportView, setReportView] = useState("latest");
+  const snapshot = research.baselineSnapshot;
+  const diffClaims = research.insightDiff?.claims ?? [];
+  const latestView = buildCitationView(
+    content,
+    research.sources ?? [],
+    research.citations ?? [],
+  );
+  const baselineView = snapshot
+    ? buildCitationView(
+        snapshot.report,
+        snapshot.sources ?? [],
+        snapshot.citations ?? [],
+      )
+    : null;
+  const showingBaseline = reportView === "baseline" && baselineView;
+  const citationView = showingBaseline ? baselineView : latestView;
+  const report = citationView.content;
+  const citations = citationView.citations;
+  const sources = citationView.sources;
+  function remapEvidence(evidence = [], view) {
+    return evidence
+      .filter((item) => view?.idMap.has(item.source_id))
+      .map((item) => ({
+        ...item,
+        source_id: view.idMap.get(item.source_id),
+      }));
+  }
+  const annotations = showingBaseline
+    ? []
+    : diffClaims
+        .filter((claim) => claim.kind !== "stale")
+        .map((claim) => ({
+          ...claim,
+          baseline_evidence: remapEvidence(
+            claim.baseline_evidence,
+            baselineView,
+          ),
+          latest_evidence: remapEvidence(claim.latest_evidence, latestView),
+        }));
+  const latestDate = formatResearchDate(
+    research.insightDiff?.latest_created_at ?? research.updatedAt,
+  );
+  const baselineDate = formatResearchDate(
+    research.insightDiff?.baseline_created_at ?? snapshot?.created_at,
+  );
+
+  return h(
+    "section",
+    { className: "research-report" },
+    h(
+      "header",
+      { className: "research-report-header" },
+      h(
+        "div",
+        null,
+        h(
+          "span",
+          { className: "research-report-kicker" },
+          snapshot ? "Updated research report" : "Research report",
+        ),
+        latestDate
+          ? h("span", { className: "research-report-date" }, latestDate)
+          : null,
+      ),
+      h(
+        "button",
+        {
+          className: "research-compare-button",
+          type: "button",
+          disabled: compareDisabled,
+          onClick: () => onCompare(research.jobId),
+        },
+        h(Icon, { name: "arrows-clockwise" }),
+        "Compare with latest evidence",
+      ),
+    ),
+    snapshot
+      ? [
+          h(
+            "div",
+            { className: "research-report-tabs", role: "tablist", key: "tabs" },
+            [
+              { value: "latest", label: "Latest report" },
+              { value: "baseline", label: "Baseline report" },
+            ].map((option) =>
+              h(
+                "button",
+                {
+                  key: option.value,
+                  type: "button",
+                  role: "tab",
+                  "aria-selected": reportView === option.value,
+                  className: reportView === option.value ? "selected" : "",
+                  onClick: () => setReportView(option.value),
+                },
+                option.label,
+              ),
+            ),
+          ),
+          h(
+            "div",
+            { className: "research-snapshot-line", key: "snapshot" },
+            h(
+              "span",
+              null,
+              h(Icon, { name: "file-text" }),
+              `Baseline${baselineDate ? ` · ${baselineDate}` : ""}`,
+            ),
+            h(Icon, { name: "arrow-right" }),
+            h(
+              "span",
+              null,
+              h(Icon, { name: "file-text" }),
+              `Latest${latestDate ? ` · ${latestDate}` : ""}`,
+            ),
+            h(
+              "small",
+              null,
+              h(Icon, { name: "lock-key" }),
+              "Both snapshots are preserved",
+            ),
+          ),
+          reportView === "latest"
+            ? h(DiffSummary, {
+                claims: diffClaims,
+                compared: Boolean(research.insightDiff),
+                key: "summary",
+              })
+            : null,
+        ]
+      : null,
+    h(
+      "div",
+      { className: "research-report-content" },
+      h(MarkdownContent, {
+        content: report,
+        citations,
+        headingAnnotations: annotations,
+      }),
+    ),
+    !showingBaseline ? h(StaleClaims, { claims: diffClaims }) : null,
+    h(ResearchSources, { sources, citations }),
+  );
+}
+
+function Message({ message, onResumeResearch, onCompareResearch, isStreaming }) {
+  const hasResearchReport = Boolean(
+    message.content && message.research?.status === "completed",
+  );
+  const progressElement = message.research
+    ? h(ResearchProgress, {
+        research: message.research,
+        onResume: (jobId) => onResumeResearch(message.id, jobId),
+      })
+    : null;
+  const contentElement = message.content
+    ? message.role === "assistant"
+      ? h(
+          "div",
+          { className: "message-content" },
+          h(MarkdownContent, {
+            content: message.content,
+            citations: message.research?.citations,
+          }),
+        )
+      : h("div", { className: "message-content" }, message.content)
+    : message.research
+      ? null
+      : h(
+          "div",
+          { className: "message-content" },
+          h("span", { className: "typing-dots" }, "Thinking"),
+        );
   return h(
     "article",
     { className: `message ${message.role}` },
@@ -878,34 +1076,41 @@ function Message({ message, onResumeResearch }) {
     h(
       "div",
       { className: "message-body" },
-      h(
-        "div",
-        { className: "message-content" },
-        message.content
-          ? message.role === "assistant"
-            ? h(MarkdownContent, {
-                content: message.content,
-                citations: message.research?.citations,
-              })
-            : message.content
-          : message.research
-            ? null
-            : h("span", { className: "typing-dots" }, "Thinking"),
-      ),
-      h(ResearchProgress, {
-        research: message.research,
-        onResume: (jobId) => onResumeResearch(message.id, jobId),
-      }),
+      hasResearchReport
+        ? h(
+            "div",
+            { className: "research-turn" },
+            progressElement,
+            h(ResearchReport, {
+              content: message.content,
+              research: message.research,
+              compareDisabled: isStreaming || message.research.isDemo,
+              onCompare: (jobId) => onCompareResearch(message.id, jobId),
+            }),
+          )
+        : h(React.Fragment, null, progressElement, contentElement),
     ),
   );
 }
 
-function Conversation({ messages, endRef, onResumeResearch }) {
+function Conversation({
+  messages,
+  endRef,
+  onResumeResearch,
+  onCompareResearch,
+  isStreaming,
+}) {
   return h(
     "section",
     { className: "messages", "aria-live": "polite" },
     messages.map((message) =>
-      h(Message, { message, key: message.id, onResumeResearch }),
+      h(Message, {
+        message,
+        key: message.id,
+        onResumeResearch,
+        onCompareResearch,
+        isStreaming,
+      }),
     ),
     h("div", { ref: endRef }),
   );
@@ -2001,7 +2206,12 @@ function App({ authSession }) {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [conversations, setConversations] = useState([]);
-  const [conversationId, setConversationId] = useState(null);
+  const [conversationId, setConversationId] = useState(
+    initialRoute.conversationId,
+  );
+  const [isConversationLoading, setIsConversationLoading] = useState(
+    Boolean(initialRoute.conversationId),
+  );
   const [isStreaming, setIsStreaming] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [toast, setToast] = useState("");
@@ -2016,6 +2226,8 @@ function App({ authSession }) {
   const activeResearchJobRef = useRef(null);
   const activeAssistantRef = useRef(null);
   const endRef = useRef(null);
+  const conversationIdRef = useRef(initialRoute.conversationId);
+  const conversationsRef = useRef([]);
   const memoryReviewCount = memories.filter((memory) =>
     ["candidate", "conflict", "stale"].includes(memory.status),
   ).length;
@@ -2023,8 +2235,21 @@ function App({ authSession }) {
     (attachment) => attachment.status === "uploading",
   );
 
-  function showRoute(view, nextMode = mode, { replace = false } = {}) {
-    const hash = routeHash(view, nextMode);
+  function updateConversationId(nextConversationId) {
+    conversationIdRef.current = nextConversationId;
+    setConversationId(nextConversationId);
+  }
+
+  function showRoute(
+    view,
+    nextMode = mode,
+    {
+      replace = false,
+      conversationId: nextConversationId =
+        view === "chat" ? conversationIdRef.current : null,
+    } = {},
+  ) {
+    const hash = routeHash(view, nextMode, nextConversationId);
     if (window.location.hash !== hash) {
       window.history[replace ? "replaceState" : "pushState"](null, "", hash);
     }
@@ -2037,7 +2262,10 @@ function App({ authSession }) {
     return { ...extra, Authorization: `Bearer ${token}` };
   }
 
-  async function loadConversations() {
+  async function loadConversations({
+    restoreConversationId = null,
+    restoreMode = null,
+  } = {}) {
     try {
       const headers = await authorizationHeaders();
       const [healthResponse, response] = await Promise.all([
@@ -2049,9 +2277,32 @@ function App({ authSession }) {
       if (!healthResponse.ok || !response.ok)
         throw new Error("API unavailable");
       const payload = await response.json();
-      setConversations(payload.conversations);
+      const nextConversations = payload.conversations ?? [];
+      conversationsRef.current = nextConversations;
+      setConversations(nextConversations);
+      if (restoreConversationId) {
+        const conversation = nextConversations.find(
+          (item) => item.id === restoreConversationId,
+        );
+        if (conversation) {
+          await openConversation(conversation, {
+            replaceRoute: true,
+            routeMode: restoreMode,
+          });
+        } else {
+          updateConversationId(null);
+          setMessages([]);
+          setIsConversationLoading(false);
+          showRoute("chat", initialRoute.mode, {
+            replace: true,
+            conversationId: null,
+          });
+        }
+      }
     } catch {
+      conversationsRef.current = [];
       setConversations([]);
+      if (restoreConversationId) setIsConversationLoading(false);
     }
   }
 
@@ -2078,10 +2329,43 @@ function App({ authSession }) {
       const next = routeFromLocation();
       setActiveView(next.view);
       setMode(next.mode);
+      if (next.view !== "chat") return;
+      if (!next.conversationId) {
+        setIsConversationLoading(false);
+        if (conversationIdRef.current) {
+          abortRef.current?.abort();
+          activeResearchJobRef.current = null;
+          activeAssistantRef.current = null;
+          updateConversationId(null);
+          setMessages([]);
+          setInput("");
+          setAttachments([]);
+          setIsStreaming(false);
+        }
+        return;
+      }
+      if (next.conversationId === conversationIdRef.current) return;
+      const conversation = conversationsRef.current.find(
+        (item) => item.id === next.conversationId,
+      );
+      if (conversation) {
+        void openConversation(conversation, {
+          replaceRoute: true,
+          routeMode: next.mode,
+        });
+      } else {
+        void loadConversations({
+          restoreConversationId: next.conversationId,
+          restoreMode: next.mode,
+        });
+      }
     }
     window.addEventListener("popstate", syncRoute);
     window.addEventListener("hashchange", syncRoute);
-    void loadConversations();
+    void loadConversations({
+      restoreConversationId: initialRoute.conversationId,
+      restoreMode: initialRoute.mode,
+    });
     void loadMemories();
     return () => {
       window.removeEventListener("popstate", syncRoute);
@@ -2116,20 +2400,24 @@ function App({ authSession }) {
     abortRef.current?.abort();
     activeResearchJobRef.current = null;
     activeAssistantRef.current = null;
-    setConversationId(null);
+    updateConversationId(null);
+    setIsConversationLoading(false);
     setMessages([]);
     setInput("");
     setAttachments([]);
-    showRoute("chat", "chat");
+    showRoute("chat", "chat", { conversationId: null });
     setSidebarOpen(false);
   }
 
-  async function openConversation(conversation) {
+  async function openConversation(
+    conversation,
+    { replaceRoute = false, routeMode = null } = {},
+  ) {
     abortRef.current?.abort();
     activeResearchJobRef.current = null;
     activeAssistantRef.current = null;
     setIsStreaming(false);
-    showRoute("chat", mode);
+    setIsConversationLoading(true);
     try {
       const response = await fetch(
         `${API_BASE}/api/conversations/${conversation.id}`,
@@ -2137,8 +2425,11 @@ function App({ authSession }) {
       );
       if (!response.ok) throw new Error("Conversation unavailable");
       const payload = await response.json();
-      setConversationId(payload.id);
-      showRoute("chat", payload.mode);
+      updateConversationId(payload.id);
+      showRoute("chat", routeMode ?? payload.mode, {
+        replace: replaceRoute,
+        conversationId: payload.id,
+      });
       const hydratedMessages = await Promise.all(
         payload.messages.map(async (message) => {
           const baseMessage = {
@@ -2162,6 +2453,15 @@ function App({ authSession }) {
                 jobId: job.id,
                 status: job.status,
                 progress: job.progress,
+                currentStep: researchCurrentStep({
+                  status: job.status,
+                  currentStep: job.current_step,
+                }),
+                totalSteps: job.total_steps ?? 6,
+                baselineJobId: job.baseline_job_id,
+                baselineSnapshot: job.checkpoint.baseline_snapshot,
+                insightDiff: job.checkpoint.insight_diff,
+                updatedAt: job.updated_at,
                 providerResponseId: job.provider_response_id,
                 providerStatus: job.provider_status,
                 sources: job.checkpoint.sources,
@@ -2184,6 +2484,8 @@ function App({ authSession }) {
                 webCitationCoverage: job.web_citation_coverage,
                 fileCorroborationCoverage: job.file_corroboration_coverage,
                 qualityWarning: job.quality_warning,
+                isDemo:
+                  job.prompt_version === "local-demo-insight-diff-v1",
                 ...retrySnapshot,
                 softDeadlineReached: job.soft_deadline_reached,
                 degradedReasons: job.degraded_reasons ?? [],
@@ -2208,6 +2510,7 @@ function App({ authSession }) {
               "planning",
               "collecting",
               "verifying",
+              "comparing",
               "synthesizing",
             ].includes(message.research.status),
         );
@@ -2221,6 +2524,8 @@ function App({ authSession }) {
       }
     } catch {
       setToast("The conversation could not be opened.");
+    } finally {
+      setIsConversationLoading(false);
     }
   }
 
@@ -2248,9 +2553,11 @@ function App({ authSession }) {
         },
       );
       if (response.status !== 204) throw new Error("Delete failed");
-      setConversations((current) =>
-        current.filter((item) => item.id !== conversation.id),
-      );
+      setConversations((current) => {
+        const next = current.filter((item) => item.id !== conversation.id);
+        conversationsRef.current = next;
+        return next;
+      });
       if (conversation.id === conversationId) resetConversation();
       setToast("Conversation deleted.");
     } catch {
@@ -2412,9 +2719,15 @@ function App({ authSession }) {
   }
 
   function handleStreamEvent(event, assistantId) {
+    if (event.conversation_id) {
+      updateConversationId(event.conversation_id);
+      showRoute("chat", mode, {
+        replace: true,
+        conversationId: event.conversation_id,
+      });
+    }
     if (event.type === "research_started") {
       activeResearchJobRef.current = event.job_id;
-      setConversationId(event.conversation_id);
       updateAssistantMessage(assistantId, (message) => ({
         ...message,
         research: {
@@ -2422,6 +2735,10 @@ function App({ authSession }) {
           jobId: event.job_id,
           status: event.status,
           progress: event.progress,
+          currentStep: event.current_step,
+          totalSteps: event.total_steps,
+          baselineJobId: event.baseline_job_id,
+          updatedAt: event.updated_at,
           restarted: event.restarted,
           searchRound: event.search_round,
           maxSearchRounds: event.max_search_rounds,
@@ -2457,6 +2774,10 @@ function App({ authSession }) {
           jobId: event.job_id,
           status: event.status,
           progress: event.progress,
+          currentStep: event.current_step,
+          totalSteps: event.total_steps,
+          baselineJobId: event.baseline_job_id,
+          updatedAt: event.updated_at,
           searchRound: event.search_round,
           maxSearchRounds: event.max_search_rounds,
           completedSubtasks: event.completed_subtasks,
@@ -2499,7 +2820,6 @@ function App({ authSession }) {
       }));
     }
     if (event.type === "done") {
-      setConversationId(event.conversation_id);
       updateAssistantMessage(assistantId, (message) => ({
         ...message,
         research: message.research
@@ -2507,6 +2827,15 @@ function App({ authSession }) {
               ...message.research,
               status: event.status ?? "completed",
               progress: 1,
+              currentStep: event.current_step ?? 6,
+              totalSteps: event.total_steps ?? 6,
+              baselineJobId:
+                event.baseline_job_id ?? message.research.baselineJobId,
+              baselineSnapshot:
+                event.baseline_snapshot ?? message.research.baselineSnapshot,
+              insightDiff:
+                event.insight_diff ?? message.research.insightDiff,
+              updatedAt: event.updated_at ?? message.research.updatedAt,
               citations: event.citations ?? [],
               totalToolCalls:
                 event.total_tool_calls ?? message.research.totalToolCalls,
@@ -2565,7 +2894,12 @@ function App({ authSession }) {
         ...message,
         content: event.message,
         research: message.research
-          ? { ...message.research, status: "failed" }
+          ? {
+              ...message.research,
+              status: "failed",
+              recoveryState: null,
+              retryAfterSeconds: 0,
+            }
           : message.research,
       }));
       setToast(
@@ -2590,6 +2924,8 @@ function App({ authSession }) {
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
+      const responseJobId = response.headers.get("X-Research-Job-ID");
+      if (responseJobId) activeResearchJobRef.current = responseJobId;
       await readSseStream(response, (event) =>
         handleStreamEvent(event, assistantId),
       );
@@ -2637,7 +2973,14 @@ function App({ authSession }) {
         role: "assistant",
         content: "",
         research: isResearch
-          ? { status: "queued", progress: 0, sources: [], citations: [] }
+          ? {
+              status: "queued",
+              progress: 0,
+              currentStep: 1,
+              totalSteps: 6,
+              sources: [],
+              citations: [],
+            }
           : null,
       },
     ]);
@@ -2672,6 +3015,40 @@ function App({ authSession }) {
     activeResearchJobRef.current = jobId;
     await runStreamingRequest({
       endpoint: `/api/research/${jobId}/resume`,
+      assistantId,
+    });
+  }
+
+  async function compareResearch(_assistantId, jobId) {
+    if (!jobId || isStreaming) return;
+    const userMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: "Compare this report with the latest evidence.",
+    };
+    const assistantId = crypto.randomUUID();
+    setMessages((current) => [
+      ...current,
+      userMessage,
+      {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        research: {
+          status: "queued",
+          progress: 0,
+          currentStep: 1,
+          totalSteps: 6,
+          baselineJobId: jobId,
+          sources: [],
+          citations: [],
+        },
+      },
+    ]);
+    showRoute("chat", "research");
+    setIsStreaming(true);
+    await runStreamingRequest({
+      endpoint: `/api/research/${jobId}/compare`,
       assistantId,
     });
   }
@@ -2906,7 +3283,18 @@ function App({ authSession }) {
         : h(
             "div",
             { className: `workspace${messages.length ? " has-messages" : ""}` },
-            messages.length
+            isConversationLoading
+              ? h(
+                  "section",
+                  {
+                    className: "conversation-loading",
+                    role: "status",
+                    "aria-live": "polite",
+                  },
+                  h(Icon, { name: "snowflake" }),
+                  h("span", null, "Opening conversation…"),
+                )
+              : messages.length
               ? h(
                   "div",
                   { className: "conversation-workspace" },
@@ -2914,6 +3302,8 @@ function App({ authSession }) {
                     messages,
                     endRef,
                     onResumeResearch: resumeResearch,
+                    onCompareResearch: compareResearch,
+                    isStreaming,
                   }),
                   h(Composer, composerProps),
                 )

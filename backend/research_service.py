@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from collections.abc import Iterator, Mapping
-from datetime import timedelta
+from datetime import datetime, timedelta
 from math import ceil
 from typing import Any, cast
 from uuid import UUID
@@ -22,12 +22,18 @@ from .models import (
     ResearchBudget,
     ResearchCitation,
     ResearchCitationKind,
+    ResearchCheckpoint,
+    ResearchDiffClaim,
+    ResearchDiffEvidence,
+    ResearchDiffKind,
     ResearchEvidenceStatus,
     ResearchEvidenceGap,
     ResearchFileClaim,
     ResearchFileClaimAssessment,
     ResearchFileReview,
     ResearchJob,
+    ResearchInsightDiff,
+    ResearchReportSnapshot,
     ResearchRequest,
     ResearchSource,
     ResearchStatus,
@@ -47,8 +53,11 @@ from .research_provider import (
 from .research_quality import evaluate_research_quality
 from .research_repositories import ResearchRepository
 from .research_resilience import (
+    MAX_RATE_LIMIT_WAIT_SECONDS,
+    MAX_RETRY_DELAY_SECONDS,
     RecoveryAction,
     classify_research_failure,
+    is_terminal_research_failure,
     retry_delay_seconds,
 )
 from .source_urls import canonical_source_url
@@ -60,7 +69,7 @@ TERMINAL_JOB_STATUSES = {
     ResearchStatus.COMPLETED,
     ResearchStatus.CANCELLED,
 }
-PROMPT_VERSION = "research-harness-v4"
+PROMPT_VERSION = "research-harness-v5"
 DEFAULT_MIN_CITATION_COVERAGE = 0.8
 MAX_CITATION_REPAIR_ATTEMPTS = 2
 OPENAI_BACKGROUND_GUIDE_URL = (
@@ -147,6 +156,16 @@ class ResearchService:
         self.file_service = file_service
         self.logger = logger or logging.getLogger(__name__)
 
+    def _new_budget(self) -> ResearchBudget:
+        return ResearchBudget(
+            max_search_rounds=self.max_search_rounds,
+            max_subquestions=self.max_subquestions,
+            max_total_tool_calls=self.max_total_tool_calls,
+            max_tool_call_overrun=self._configured_tool_call_overrun(),
+            soft_timeout_seconds=self.soft_timeout_seconds,
+            timeout_seconds=self.job_timeout_seconds,
+        )
+
     def start_job(self, request: ResearchRequest, user_id: str) -> ResearchJob:
         input_file_ids: list[UUID] = []
         if self.file_service is not None:
@@ -161,14 +180,7 @@ class ResearchService:
             user_id=user_id,
             attachment_ids=input_file_ids,
         )
-        budget = ResearchBudget(
-            max_search_rounds=self.max_search_rounds,
-            max_subquestions=self.max_subquestions,
-            max_total_tool_calls=self.max_total_tool_calls,
-            max_tool_call_overrun=self._configured_tool_call_overrun(),
-            soft_timeout_seconds=self.soft_timeout_seconds,
-            timeout_seconds=self.job_timeout_seconds,
-        )
+        budget = self._new_budget()
         memory_ids: list[UUID] = []
         if self.memory_service is not None:
             memory_ids, _ = self.memory_service.context_for_query(
@@ -197,12 +209,94 @@ class ResearchService:
         job.updated_at = utc_now()
         return self.jobs.save_job(job, user_id)
 
+    def start_comparison(
+        self,
+        baseline_job_id: UUID | str,
+        user_id: str,
+    ) -> ResearchJob:
+        """Freeze a completed report and research the same brief again."""
+
+        baseline = self.jobs.get_job(baseline_job_id, user_id)
+        if (
+            baseline.status != ResearchStatus.COMPLETED
+            or not baseline.checkpoint.report.strip()
+        ):
+            raise ResearchJobConflictError(
+                "Only a completed Research report can be compared."
+            )
+
+        conversation_id = self.conversations.append_user_message(
+            baseline.conversation_id,
+            "Compare this report with the latest evidence.",
+            AgentMode.RESEARCH,
+            user_id=user_id,
+        )
+        checkpoint = ResearchCheckpoint(
+            brief=(
+                baseline.checkpoint.brief.model_copy(deep=True)
+                if baseline.checkpoint.brief is not None
+                else None
+            ),
+            file_review=(
+                baseline.checkpoint.file_review.model_copy(deep=True)
+                if baseline.checkpoint.file_review is not None
+                else None
+            ),
+            baseline_snapshot=ResearchReportSnapshot(
+                job_id=baseline.id,
+                created_at=baseline.updated_at,
+                report=baseline.checkpoint.report,
+                sources=[
+                    source.model_copy(deep=True)
+                    for source in baseline.checkpoint.sources
+                ],
+                citations=[
+                    citation.model_copy(deep=True)
+                    for citation in baseline.checkpoint.citations
+                ],
+            ),
+        )
+        job = ResearchJob(
+            user_id=user_id,
+            conversation_id=UUID(conversation_id),
+            query=baseline.query,
+            baseline_job_id=baseline.id,
+            model=self.provider.model,
+            prompt_version=PROMPT_VERSION,
+            budget=self._new_budget(),
+            memory_ids=list(baseline.memory_ids),
+            input_file_ids=list(baseline.input_file_ids),
+            checkpoint=checkpoint,
+        )
+        if job.checkpoint.brief is None:
+            job.checkpoint.subtasks.append(self._brief_task(job))
+        else:
+            self._create_search_tasks(job, round_index=1)
+            job.search_round = 1
+            job.status = ResearchStatus.COLLECTING
+            job.progress = 0.15
+        job = self.jobs.create_job(job)
+        message_id = self.conversations.append_assistant_message(
+            conversation_id,
+            "",
+            user_id=user_id,
+            research_job_id=job.id,
+        )
+        job.checkpoint.assistant_message_id = UUID(message_id)
+        job.updated_at = utc_now()
+        return self.jobs.save_job(job, user_id)
+
     def get_job(self, job_id: UUID | str, user_id: str) -> ResearchJob:
         """Refresh saved responses only; a GET never starts provider work."""
 
         job = self.jobs.get_job(job_id, user_id)
         budget_changed = self._refresh_budget_state(job)
-        if self._consolidate_source_ledger(job) or budget_changed:
+        retry_changed = self._normalize_retry_deadlines(job)
+        if (
+            self._consolidate_source_ledger(job)
+            or budget_changed
+            or retry_changed
+        ):
             job.updated_at = utc_now()
             job = self.jobs.save_job(job, user_id)
         if job.status in TERMINAL_JOB_STATUSES | {ResearchStatus.FAILED}:
@@ -284,6 +378,7 @@ class ResearchService:
         job.failure_reason = None
         job.provider_backoff_until = None
         job.rate_limit_count = 0
+        job.rate_limit_wait_seconds = 0
         job.soft_deadline_reached = False
         job.run_started_at = utc_now()
         job.updated_at = utc_now()
@@ -477,6 +572,8 @@ class ResearchService:
             job = self._advance_collecting(job, allow_start=allow_start)
         if job.status == ResearchStatus.VERIFYING:
             job = self._advance_verifying(job, allow_start=allow_start)
+        if job.status == ResearchStatus.COMPARING:
+            job = self._advance_comparing(job, allow_start=allow_start)
         if job.status == ResearchStatus.SYNTHESIZING:
             job = self._advance_synthesis(job, allow_start=allow_start)
 
@@ -585,6 +682,13 @@ class ResearchService:
                 allow_start=allow_start,
             )
             if task.status == ResearchTaskStatus.FAILED:
+                if task.error_code == "research_rate_limited" or (
+                    is_terminal_research_failure(task.error_code)
+                ):
+                    if is_terminal_research_failure(task.error_code):
+                        self._cancel_active_tasks(job)
+                    self._fail_from_task(job, task)
+                    return job
                 self._add_degraded_reason(
                     job,
                     f"{task.id} could not complete ({task.error_code or 'unknown error'}).",
@@ -691,9 +795,48 @@ class ResearchService:
             job.status = ResearchStatus.COLLECTING
             job.progress = max(job.progress, 0.58)
         else:
-            self._create_synthesis_task(job)
-            job.status = ResearchStatus.SYNTHESIZING
-            job.progress = max(job.progress, 0.78)
+            if job.baseline_job_id is not None:
+                self._create_compare_task(job)
+                job.status = ResearchStatus.COMPARING
+                job.progress = max(job.progress, 0.76)
+            else:
+                self._create_synthesis_task(job)
+                job.status = ResearchStatus.SYNTHESIZING
+                job.progress = max(job.progress, 0.78)
+        return job
+
+    def _advance_comparing(
+        self,
+        job: ResearchJob,
+        *,
+        allow_start: bool,
+    ) -> ResearchJob:
+        task = self._task(job, "compare-claims")
+        if task is None:
+            task = self._create_compare_task(job)
+        self._advance_task(
+            job,
+            task,
+            self._comparison_request(job),
+            allow_start=allow_start,
+        )
+        if task.status == ResearchTaskStatus.FAILED:
+            self._fail_from_task(job, task)
+            return job
+        if task.status != ResearchTaskStatus.COMPLETED:
+            job.progress = max(job.progress, 0.8)
+            return job
+        try:
+            job.checkpoint.insight_diff = self._parse_insight_diff(
+                job,
+                task.output_text,
+            )
+        except ResearchProviderError as error:
+            self._recover_stage_parse_error(job, task, error)
+            return job
+        self._create_synthesis_task(job)
+        job.status = ResearchStatus.SYNTHESIZING
+        job.progress = max(job.progress, 0.86)
         return job
 
     def _advance_synthesis(
@@ -806,6 +949,7 @@ class ResearchService:
         }:
             return
         now = utc_now()
+        self._normalize_retry_deadlines(job, now=now)
         if job.provider_backoff_until and job.provider_backoff_until > now:
             return
         if task.status == ResearchTaskStatus.RETRY_WAIT:
@@ -923,6 +1067,16 @@ class ResearchService:
             retry_after_seconds=error.retry_after_seconds,
             jitter_key=f"{job.id}:{task.id}",
         )
+        if error.code == "research_rate_limited":
+            projected_wait = job.rate_limit_wait_seconds + delay
+            if projected_wait > MAX_RATE_LIMIT_WAIT_SECONDS:
+                task.status = ResearchTaskStatus.FAILED
+                task.next_retry_at = None
+                task.retry_strategy = None
+                task.updated_at = now
+                job.provider_backoff_until = None
+                return
+            job.rate_limit_wait_seconds = projected_wait
         retry_at = now + timedelta(seconds=delay)
         task.status = ResearchTaskStatus.RETRY_WAIT
         task.retry_strategy = decision.action.value
@@ -940,6 +1094,38 @@ class ResearchService:
         if job.provider_backoff_until is not None:
             job.provider_backoff_until = None
             job.rate_limit_count = 0
+
+    @staticmethod
+    def _normalize_retry_deadlines(
+        job: ResearchJob,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Clamp stale or malformed persisted retry deadlines."""
+
+        current = now or utc_now()
+        latest_retry = current + timedelta(seconds=MAX_RETRY_DELAY_SECONDS)
+        changed = False
+        if (
+            job.provider_backoff_until is not None
+            and job.provider_backoff_until > latest_retry
+        ):
+            job.provider_backoff_until = latest_retry
+            job.rate_limit_wait_seconds = min(
+                MAX_RATE_LIMIT_WAIT_SECONDS,
+                max(job.rate_limit_wait_seconds, MAX_RETRY_DELAY_SECONDS),
+            )
+            changed = True
+        for retry_task in job.checkpoint.subtasks:
+            if (
+                retry_task.status == ResearchTaskStatus.RETRY_WAIT
+                and retry_task.next_retry_at is not None
+                and retry_task.next_retry_at > latest_retry
+            ):
+                retry_task.next_retry_at = latest_retry
+                retry_task.updated_at = current
+                changed = True
+        return changed
 
     def _recover_stage_parse_error(
         self,
@@ -1196,6 +1382,10 @@ class ResearchService:
                 retryable=True,
             )
         job.checkpoint.report = normalized
+        if job.checkpoint.insight_diff is not None:
+            job.checkpoint.insight_diff = job.checkpoint.insight_diff.model_copy(
+                update={"latest_created_at": utc_now()}
+            )
         if not preserve_citations:
             job.checkpoint.citations = self._citations_from_markers(job, normalized)
         metrics = evaluate_research_quality(
@@ -1236,7 +1426,7 @@ class ResearchService:
         job.provider_status = "completed"
         job.progress = 1.0
         job.failure_reason = None
-        if self.memory_service is not None:
+        if self.memory_service is not None and job.baseline_job_id is None:
             try:
                 self.memory_service.capture_research_report_candidates(
                     user_id=job.user_id,
@@ -1450,6 +1640,23 @@ class ResearchService:
             objective=(
                 "Identify unsupported claims, conflicting evidence, and the "
                 "smallest useful set of follow-up searches."
+            ),
+        )
+        job.checkpoint.subtasks.append(task)
+        return task
+
+    def _create_compare_task(self, job: ResearchJob) -> ResearchSubtask:
+        existing = self._task(job, "compare-claims")
+        if existing is not None:
+            return existing
+        task = ResearchSubtask(
+            id="compare-claims",
+            kind=ResearchTaskKind.COMPARE,
+            round_index=job.search_round,
+            question="Compare the frozen baseline with the latest evidence.",
+            objective=(
+                "Classify claim-level changes without double-counting changed "
+                "claims as stale."
             ),
         )
         job.checkpoint.subtasks.append(task)
@@ -1689,6 +1896,128 @@ class ResearchService:
             file_claims=assessments,
         )
 
+    def _parse_insight_diff(
+        self,
+        job: ResearchJob,
+        output_text: str,
+    ) -> ResearchInsightDiff:
+        snapshot = job.checkpoint.baseline_snapshot
+        if snapshot is None or job.baseline_job_id is None:
+            raise _invalid_structure("research_comparison_invalid")
+        payload = _parse_json_object(
+            output_text,
+            "research_comparison_invalid",
+        )
+        raw_claims = payload.get("claims")
+        if not isinstance(raw_claims, list):
+            raise _invalid_structure("research_comparison_invalid")
+
+        baseline_sources = {source.id: source for source in snapshot.sources}
+        latest_sources = {
+            source.id: source for source in job.checkpoint.sources
+        }
+        parsed: list[ResearchDiffClaim] = []
+        claimed_baselines: set[str] = set()
+        raw_mappings = [
+            mapping
+            for value in cast(list[object], raw_claims)[:100]
+            if (mapping := _object_mapping(value)) is not None
+        ]
+        raw_mappings.sort(
+            key=lambda value: str(value.get("kind", "")) == "stale"
+        )
+        for index, raw_claim in enumerate(raw_mappings):
+            try:
+                kind = ResearchDiffKind(
+                    str(raw_claim.get("kind", "")).strip().lower()
+                )
+            except ValueError:
+                continue
+            baseline_claim = (
+                str(raw_claim.get("baseline_claim", "")).strip() or None
+            )
+            latest_claim = (
+                str(raw_claim.get("latest_claim", "")).strip() or None
+            )
+            baseline_key = _normalized_claim_key(baseline_claim)
+            if (
+                kind == ResearchDiffKind.STALE
+                and baseline_key
+                and baseline_key in claimed_baselines
+            ):
+                continue
+            raw_confidence = raw_claim.get("confidence", 0.5)
+            try:
+                confidence = (
+                    float(raw_confidence)
+                    if isinstance(raw_confidence, (int, float, str))
+                    else 0.5
+                )
+            except ValueError:
+                confidence = 0.5
+            claim = ResearchDiffClaim(
+                id=_safe_identifier(
+                    str(raw_claim.get("id", f"change-{index + 1}")),
+                    fallback=f"change-{index + 1}",
+                ),
+                kind=kind,
+                section=(
+                    str(raw_claim.get("section", "")).strip()
+                    or f"Finding {index + 1}"
+                ),
+                baseline_claim=baseline_claim,
+                latest_claim=latest_claim,
+                baseline_evidence=self._diff_evidence(
+                    _string_list(
+                        raw_claim.get("baseline_source_ids"),
+                        limit=20,
+                    ),
+                    baseline_sources,
+                ),
+                latest_evidence=self._diff_evidence(
+                    _string_list(
+                        raw_claim.get("latest_source_ids"),
+                        limit=20,
+                    ),
+                    latest_sources,
+                ),
+                confidence=min(1.0, max(0.0, confidence)),
+                rationale=str(raw_claim.get("rationale", "")).strip(),
+            )
+            parsed.append(claim)
+            if baseline_key and kind != ResearchDiffKind.STALE:
+                claimed_baselines.add(baseline_key)
+
+        return ResearchInsightDiff(
+            baseline_job_id=job.baseline_job_id,
+            baseline_created_at=snapshot.created_at,
+            claims=parsed,
+        )
+
+    @staticmethod
+    def _diff_evidence(
+        source_ids: list[str],
+        sources: Mapping[str, ResearchSource],
+    ) -> list[ResearchDiffEvidence]:
+        evidence: list[ResearchDiffEvidence] = []
+        seen: set[str] = set()
+        for source_id in source_ids:
+            if source_id in seen:
+                continue
+            source = sources.get(source_id)
+            if source is None:
+                continue
+            seen.add(source_id)
+            evidence.append(
+                ResearchDiffEvidence(
+                    source_id=source.id,
+                    title=source.title,
+                    url=source.url,
+                    published_at=source.published_at,
+                )
+            )
+        return evidence
+
     def _brief_request(self, job: ResearchJob) -> ResearchProviderRequest:
         official_requirements = _official_topic_requirements(job.query)
         memory_context = self._memory_context(job)
@@ -1862,6 +2191,74 @@ Use an empty gaps array when no second search round is needed. Do not use Markdo
 fences."""
         return ResearchProviderRequest(prompt=prompt, task_kind="verify")
 
+    def _comparison_request(self, job: ResearchJob) -> ResearchProviderRequest:
+        snapshot = job.checkpoint.baseline_snapshot
+        if snapshot is None:
+            raise ResearchProviderError(
+                "research_comparison_invalid",
+                "Mind could not read the frozen baseline report.",
+                retryable=False,
+            )
+        baseline_sources = "\n".join(
+            f"{source.id}: {source.title} — {source.url}"
+            for source in snapshot.sources
+        ) or "No baseline source ledger was saved."
+        verification = (
+            json.dumps(
+                job.checkpoint.verification.model_dump(mode="json"),
+                ensure_ascii=False,
+            )
+            if job.checkpoint.verification is not None
+            else "No separate verification record."
+        )
+        prompt = f"""You are the claim comparison stage of Mind's Research Harness.
+Compare the immutable baseline report with the newly collected and verified evidence.
+Return only material claim-level changes. The four kinds are mutually exclusive:
+- changed: a baseline claim has a reliable replacement with a different value.
+- new: a supported latest claim did not exist in the baseline.
+- contradicted: current credible evidence still supports materially incompatible claims.
+- stale: a baseline claim is no longer current or supported and has no reliable replacement.
+
+Never classify the old side of a changed claim as stale; that would double-count one
+change. A missing detail, wording change, or different scope is not a contradiction.
+Use a short section title suitable for an exact Markdown heading in the latest report.
+Confidence measures confidence in the classification, not probability that the fact
+is true. Use only source IDs present in the corresponding baseline or latest ledger.
+
+Original Research Brief:
+{json.dumps(job.checkpoint.brief.model_dump(mode="json"), ensure_ascii=False) if job.checkpoint.brief else job.query}
+
+IMMUTABLE BASELINE REPORT
+{snapshot.report}
+
+BASELINE SOURCE LEDGER
+{baseline_sources}
+
+LATEST VERIFICATION
+{verification}
+
+LATEST EVIDENCE AND SOURCE LEDGER
+{self._evidence_packet(job)}
+
+Return JSON only with this exact shape:
+{{
+  "claims": [
+    {{
+      "id": "change-1",
+      "kind": "changed|new|contradicted|stale",
+      "section": "short exact heading for the latest report",
+      "baseline_claim": "old claim or empty string",
+      "latest_claim": "new claim or empty string",
+      "baseline_source_ids": ["S1"],
+      "latest_source_ids": ["S2"],
+      "confidence": 0.92,
+      "rationale": "why this classification is warranted"
+    }}
+  ]
+}}
+Use an empty claims array when no material facts changed. Do not use Markdown fences."""
+        return ResearchProviderRequest(prompt=prompt, task_kind="compare")
+
     def _synthesis_request(self, job: ResearchJob) -> ResearchProviderRequest:
         verification = job.checkpoint.verification
         verification_text = (
@@ -1875,6 +2272,20 @@ fences."""
         official_requirements = _official_topic_requirements(job.query)
         memory_context = self._memory_context(job)
         file_context = self._file_claim_packet(job)
+        comparison_context = ""
+        if job.checkpoint.insight_diff is not None:
+            comparison_context = f"""
+
+IMMUTABLE BASELINE COMPARISON
+{json.dumps(job.checkpoint.insight_diff.model_dump(mode="json"), ensure_ascii=False)}
+
+Write the complete latest report, including important unchanged findings. For every
+changed, new, or contradicted comparison item, use its `section` value exactly as a
+Markdown heading so Mind can attach the structured change marker in the UI. Do not
+reinsert stale baseline claims as current conclusions. Do not mention confidence
+scores in the prose; the UI renders classification confidence separately. Start
+directly with the titled findings and do not add an Executive summary section.
+"""
         concise_instruction = (
             "Keep the report concise and prioritize the most decision-relevant "
             "findings because a previous attempt exhausted its output budget."
@@ -1905,8 +2316,8 @@ factual premise, start it exactly with `工程建议（非来源事实）：` or
 behavior or other verifiable fact. Use only IDs present in the web source ledger or
 attached-file ledger and
 target at least {self.min_citation_coverage:.0%} factual-claim coverage. Do not
-output raw URLs unless the URL itself is the subject. Include a brief Sources
-section at the end listing the most important source markers.
+output raw URLs unless the URL itself is the subject. Do not add a standalone
+Sources section; Mind renders the saved source ledger below the report.
 
 {concise_instruction}
 
@@ -1924,6 +2335,8 @@ Evidence verification:
 
 Evidence and source ledger:
 {self._evidence_packet(job)}
+
+{comparison_context}
 """
         return ResearchProviderRequest(prompt=prompt, task_kind="synthesis")
 
@@ -2162,6 +2575,7 @@ Attached-file claim and trust ledger:
         job.soft_deadline_reached = False
         job.provider_backoff_until = None
         job.rate_limit_count = 0
+        job.rate_limit_wait_seconds = 0
         job.context_reduction_level = 0
         job.degraded_reasons = []
         job.citation_coverage = None
@@ -2465,6 +2879,8 @@ Attached-file claim and trust ledger:
             return ResearchStatus.COLLECTING
         if task.kind == ResearchTaskKind.VERIFY:
             return ResearchStatus.VERIFYING
+        if task.kind == ResearchTaskKind.COMPARE:
+            return ResearchStatus.COMPARING
         return ResearchStatus.SYNTHESIZING
 
     @staticmethod
@@ -2512,7 +2928,10 @@ Attached-file claim and trust ledger:
             default=job.provider_backoff_until,
         )
         retry_after_seconds = (
-            max(0, ceil((retry_at - utc_now()).total_seconds()))
+            min(
+                int(MAX_RETRY_DELAY_SECONDS),
+                max(0, ceil((retry_at - utc_now()).total_seconds())),
+            )
             if retry_at is not None
             else None
         )
@@ -2520,6 +2939,11 @@ Attached-file claim and trust ledger:
             "status": job.status.value,
             "provider_status": job.provider_status,
             "progress": job.progress,
+            "current_step": _research_step(job),
+            "total_steps": 6,
+            "baseline_job_id": (
+                str(job.baseline_job_id) if job.baseline_job_id else None
+            ),
             "search_round": job.search_round,
             "max_search_rounds": job.budget.max_search_rounds,
             "completed_subtasks": sum(
@@ -2547,12 +2971,14 @@ Attached-file claim and trust ledger:
                 else None
             ),
             "retry_after_seconds": retry_after_seconds,
+            "rate_limit_wait_seconds": job.rate_limit_wait_seconds,
             "degraded_reasons": list(job.degraded_reasons),
             "citation_coverage": job.citation_coverage,
             "web_citation_coverage": job.web_citation_coverage,
             "file_corroboration_coverage": job.file_corroboration_coverage,
             "quality_warning": job.quality_warning,
             "memory_ids": [str(memory_id) for memory_id in job.memory_ids],
+            "updated_at": job.updated_at.isoformat(),
         }
 
     def _completed_events(
@@ -2587,6 +3013,11 @@ Attached-file claim and trust ledger:
             "conversation_id": str(job.conversation_id),
             "status": job.status.value,
             "progress": job.progress,
+            "current_step": 6,
+            "total_steps": 6,
+            "baseline_job_id": (
+                str(job.baseline_job_id) if job.baseline_job_id else None
+            ),
             "source_count": len(job.checkpoint.sources),
             "total_tool_calls": job.total_tool_calls,
             "max_total_tool_calls": job.budget.max_total_tool_calls,
@@ -2607,6 +3038,17 @@ Attached-file claim and trust ledger:
                 citation.model_dump(mode="json")
                 for citation in job.checkpoint.citations
             ],
+            "baseline_snapshot": (
+                job.checkpoint.baseline_snapshot.model_dump(mode="json")
+                if job.checkpoint.baseline_snapshot is not None
+                else None
+            ),
+            "insight_diff": (
+                job.checkpoint.insight_diff.model_dump(mode="json")
+                if job.checkpoint.insight_diff is not None
+                else None
+            ),
+            "updated_at": job.updated_at.isoformat(),
             "request_id": request_id,
         }
 
@@ -2626,6 +3068,10 @@ Attached-file claim and trust ledger:
             ),
             "research_verification_invalid": (
                 "Mind could not verify the collected evidence. Please retry it."
+            ),
+            "research_comparison_invalid": (
+                "Mind could not compare the baseline with the latest evidence. "
+                "Please retry it."
             ),
             "research_citation_coverage_low": (
                 "Mind could not reach the required citation coverage. "
@@ -2652,6 +3098,9 @@ Attached-file claim and trust ledger:
             "research_quota_exhausted": (
                 "Research usage is unavailable because its quota is exhausted."
             ),
+            "research_rate_limited": (
+                "Too many requests. Research is paused. Resume to try again."
+            ),
         }
         return {
             "type": "error",
@@ -2669,6 +3118,30 @@ Attached-file claim and trust ledger:
             },
             "request_id": request_id,
         }
+
+
+def _research_step(job: ResearchJob) -> int:
+    if job.status == ResearchStatus.COMPLETED:
+        return 6
+    if job.status in {
+        ResearchStatus.QUEUED,
+        ResearchStatus.PLANNING,
+    }:
+        return 1 if job.checkpoint.brief is None else 2
+    return {
+        ResearchStatus.COLLECTING: 3,
+        ResearchStatus.VERIFYING: 4,
+        ResearchStatus.COMPARING: 5,
+        ResearchStatus.SYNTHESIZING: 6,
+        ResearchStatus.FAILED: 1,
+        ResearchStatus.CANCELLED: 1,
+    }.get(job.status, 1)
+
+
+def _normalized_claim_key(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^\w\u3400-\u9fff]+", "", value.casefold())[:500]
 
 
 def _parse_json_object(output_text: str, error_code: str) -> dict[str, Any]:
