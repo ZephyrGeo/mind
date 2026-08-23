@@ -305,6 +305,8 @@ class ApiResearchTest(MindApiTestCase):
         self.assertIn("developers.openai.com first", search_prompt)
         self.assertIn("A true conflict requires two evidence-backed", verify_prompt)
         self.assertIn("Citation rules are sentence-level", synthesis_prompt)
+        self.assertIn("Do not output Markdown horizontal rules", synthesis_prompt)
+        self.assertIn("Do not output Markdown tables", synthesis_prompt)
 
     def test_verification_reclassifies_gaps_and_keeps_only_true_conflicts(
         self,

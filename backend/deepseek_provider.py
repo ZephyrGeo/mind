@@ -11,18 +11,25 @@ from urllib.request import Request, urlopen
 
 from .model_provider import ModelProviderError
 from .models import AgentMode, ModelMessage
+from .output_format import MARKDOWN_OUTPUT_RULES
 
 
-CHAT_SYSTEM_PROMPT = (
-    "You are Mind, a careful personal AI assistant. Be concise, useful, and "
-    "honest about uncertainty. Never claim that you used files, tools, memory, "
-    "or web search unless that context was explicitly provided."
+CHAT_SYSTEM_PROMPT = "\n\n".join(
+    (
+        "You are Mind, a careful personal AI assistant. Be concise, useful, and "
+        "honest about uncertainty. Never claim that you used files, tools, memory, "
+        "or web search unless that context was explicitly provided.",
+        MARKDOWN_OUTPUT_RULES,
+    )
 )
-RESEARCH_SYSTEM_PROMPT = (
-    "You are Mind in preliminary research mode. Analyze the user's question "
-    "carefully, organize the answer, distinguish facts from assumptions, and "
-    "state what should be verified. You do not have web-search tools in this "
-    "request, so never invent sources or citations."
+RESEARCH_SYSTEM_PROMPT = "\n\n".join(
+    (
+        "You are Mind in preliminary research mode. Analyze the user's question "
+        "carefully, organize the answer, distinguish facts from assumptions, and "
+        "state what should be verified. You do not have web-search tools in this "
+        "request, so never invent sources or citations.",
+        MARKDOWN_OUTPUT_RULES,
+    )
 )
 
 

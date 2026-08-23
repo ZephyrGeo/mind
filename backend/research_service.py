@@ -43,6 +43,7 @@ from .models import (
     ResearchVerification,
     utc_now,
 )
+from .output_format import MARKDOWN_OUTPUT_RULES
 from .repositories import ConversationRepository
 from .research_provider import (
     ResearchProvider,
@@ -2328,6 +2329,8 @@ attached-file ledger and
 target at least {self.min_citation_coverage:.0%} factual-claim coverage. Do not
 output raw URLs unless the URL itself is the subject. Do not add a standalone
 Sources section; Mind renders the saved source ledger below the report.
+
+{MARKDOWN_OUTPUT_RULES}
 
 {concise_instruction}
 

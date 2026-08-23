@@ -6,6 +6,7 @@ const h = React.createElement;
 const BLOCK_PATTERN = /^(?:#{1,6}\s+|```|>\s?|\s*(?:[-+*]|\d+\.)\s+)/;
 const ORDERED_LIST_ITEM_PATTERN = /^\s*\d+\.\s+(.+)$/;
 const UNORDERED_LIST_ITEM_PATTERN = /^\s*[-+*]\s+(.+)$/;
+const HORIZONTAL_RULE_PATTERN = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/;
 const INLINE_PATTERN = /(\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|<https?:\/\/[^>\s]+>|https?:\/\/[^\s<]+|`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*| {2,}\n)/g;
 const ADJACENT_LINK_PATTERN = /<(https?:\/\/[^>\s]+)>\s+\(\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)\)/g;
 const SOURCE_MARKER_PATTERN = /\[((?:S|F)\d+)\]/g;
@@ -408,6 +409,13 @@ function renderBlocks(markdown, options = {}) {
       continue;
     }
     const key = `block-${blockIndex}`;
+
+    if (HORIZONTAL_RULE_PATTERN.test(line)) {
+      blocks.push(h("hr", { key }));
+      index += 1;
+      blockIndex += 1;
+      continue;
+    }
 
     const fence = line.match(/^```([^\s`]*)\s*$/);
     if (fence) {
