@@ -4,6 +4,8 @@ const React = require("react");
 
 const h = React.createElement;
 const BLOCK_PATTERN = /^(?:#{1,6}\s+|```|>\s?|\s*(?:[-+*]|\d+\.)\s+)/;
+const ORDERED_LIST_ITEM_PATTERN = /^\s*\d+\.\s+(.+)$/;
+const UNORDERED_LIST_ITEM_PATTERN = /^\s*[-+*]\s+(.+)$/;
 const INLINE_PATTERN = /(\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|<https?:\/\/[^>\s]+>|https?:\/\/[^\s<]+|`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*| {2,}\n)/g;
 const ADJACENT_LINK_PATTERN = /<(https?:\/\/[^>\s]+)>\s+\(\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)\)/g;
 const SOURCE_MARKER_PATTERN = /\[((?:S|F)\d+)\]/g;
@@ -277,7 +279,9 @@ function isBlockStart(line) {
 }
 
 function collectList(lines, startIndex, ordered) {
-  const marker = ordered ? /^\s*\d+\.\s+(.+)$/ : /^\s*[-+*]\s+(.+)$/;
+  const marker = ordered
+    ? ORDERED_LIST_ITEM_PATTERN
+    : UNORDERED_LIST_ITEM_PATTERN;
   const items = [];
   let index = startIndex;
 
@@ -454,11 +458,17 @@ function renderBlocks(markdown, options = {}) {
       continue;
     }
 
-    const orderedItem = line.match(/^\s*\d+\.\s+/);
-    const unorderedItem = line.match(/^\s*[-+*]\s+/);
+    const orderedItem = line.match(ORDERED_LIST_ITEM_PATTERN);
+    const unorderedItem = line.match(UNORDERED_LIST_ITEM_PATTERN);
     if (orderedItem || unorderedItem) {
       const ordered = Boolean(orderedItem);
       const { items, nextIndex } = collectList(lines, index, ordered);
+      if (!items.length || nextIndex <= index) {
+        blocks.push(h("p", { key }, renderInline(line, key)));
+        index += 1;
+        blockIndex += 1;
+        continue;
+      }
       blocks.push(
         h(
           ordered ? "ol" : "ul",

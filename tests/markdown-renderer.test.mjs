@@ -35,6 +35,40 @@ test("research Markdown renders structure and safe external links", () => {
   assert.doesNotMatch(html, /##|\*\*|\[OpenAI Docs\]/);
 });
 
+test("streaming Markdown safely renders incomplete list markers", () => {
+  for (const content of ["1. ", "24. ", "- ", "+ ", "* "]) {
+    const html = renderToStaticMarkup(
+      React.createElement(MarkdownContent, { content }),
+    );
+
+    assert.match(html, /^<div class="markdown-content"><p>/);
+  }
+});
+
+test("every streaming prefix of a structured answer can render", () => {
+  const answer = [
+    "这份 PDF 是一份个人简历，主要内容如下：",
+    "",
+    "**基本信息**",
+    "- 姓名：测试用户",
+    "- 技能：Python、JavaScript",
+    "",
+    "**项目经历**",
+    "1. **RAG 助手**：构建带引用的文档问答流程。",
+    "2. **Research Agent**：在综合前核查证据。",
+  ].join("\n");
+
+  for (let end = 0; end <= answer.length; end += 1) {
+    assert.doesNotThrow(() =>
+      renderToStaticMarkup(
+        React.createElement(MarkdownContent, {
+          content: answer.slice(0, end),
+        }),
+      ),
+    );
+  }
+});
+
 test("adjacent equivalent OpenAI documentation links render once", () => {
   const content =
     "Source: <https://developers.openai.com/api/docs/guides/background> " +
