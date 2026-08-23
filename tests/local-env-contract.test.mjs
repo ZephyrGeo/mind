@@ -31,6 +31,9 @@ test("local development loads an optional ignored environment file", async () =>
   assert.match(example, /^MIND_FIRESTORE_DATABASE_ID=\(default\)$/m);
   assert.match(example, /^MIND_FILE_STORAGE_PROVIDER=local$/m);
   assert.match(example, /^MIND_MAX_FILE_BYTES=20000000$/m);
+  assert.match(example, /^MIND_CHAT_DAILY_LIMIT=30$/m);
+  assert.match(example, /^MIND_RESEARCH_DAILY_LIMIT=2$/m);
+  assert.match(example, /^MIND_RESEARCH_MAX_ACTIVE_PER_USER=1$/m);
   assert.match(example, /^MIND_MEMORY_PROVIDER=rules$/m);
   assert.match(example, /^MIND_MEMORY_MODEL=gpt-5\.4-mini$/m);
   assert.match(example, /^MIND_EMBEDDING_PROVIDER=local$/m);
@@ -73,6 +76,9 @@ test("staging grants the API Firebase Auth access and mounts model secrets", asy
     assert.match(source, /MIND_FILE_STORAGE_PROVIDER/);
     assert.match(source, /MIND_FILE_STORAGE_BUCKET/);
     assert.match(source, /MIND_MAX_FILE_BYTES/);
+    assert.match(source, /MIND_CHAT_DAILY_LIMIT/);
+    assert.match(source, /MIND_RESEARCH_DAILY_LIMIT/);
+    assert.match(source, /MIND_RESEARCH_MAX_ACTIVE_PER_USER/);
   }
   assert.match(deployScript, /ensureFileBucket/);
   assert.match(deployScript, /roles\/storage\.objectAdmin/);

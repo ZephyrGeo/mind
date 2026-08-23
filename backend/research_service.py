@@ -10,7 +10,7 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta
 from math import ceil
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .memory_service import MemoryService
 from .file_service import FileService
@@ -166,7 +166,13 @@ class ResearchService:
             timeout_seconds=self.job_timeout_seconds,
         )
 
-    def start_job(self, request: ResearchRequest, user_id: str) -> ResearchJob:
+    def start_job(
+        self,
+        request: ResearchRequest,
+        user_id: str,
+        *,
+        job_id: UUID | None = None,
+    ) -> ResearchJob:
         input_file_ids: list[UUID] = []
         if self.file_service is not None:
             input_file_ids, _ = self.file_service.context_for_ids(
@@ -188,6 +194,7 @@ class ResearchService:
                 request.query,
             )
         job = ResearchJob(
+            id=job_id or uuid4(),
             user_id=user_id,
             conversation_id=UUID(conversation_id),
             query=request.query,
@@ -213,6 +220,8 @@ class ResearchService:
         self,
         baseline_job_id: UUID | str,
         user_id: str,
+        *,
+        job_id: UUID | None = None,
     ) -> ResearchJob:
         """Freeze a completed report and research the same brief again."""
 
@@ -257,6 +266,7 @@ class ResearchService:
             ),
         )
         job = ResearchJob(
+            id=job_id or uuid4(),
             user_id=user_id,
             conversation_id=UUID(conversation_id),
             query=baseline.query,

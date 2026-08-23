@@ -11,6 +11,11 @@ from backend.firestore_store import (
     FirestoreMemoryRepository,
     FirestoreResearchRepository,
 )
+from backend.usage_limits import (
+    ActiveResearchLimitExceeded,
+    DailyUsageLimitExceeded,
+    FirestoreUsageLimitRepository,
+)
 from backend.file_store import AttachmentNotFoundError
 from backend.memory_store import MemoryNotFoundError
 from backend.models import (
@@ -206,6 +211,11 @@ class FirestoreRepositoryTest(unittest.TestCase):
             client=self.client,
             transactional=fake_transactional,
         )
+        self.usage = FirestoreUsageLimitRepository(
+            project_id="demo-mind-local",
+            client=self.client,
+            transactional=fake_transactional,
+        )
 
     def test_conversations_are_ordered_tenant_scoped_and_idempotent(self) -> None:
         conversation_id = self.conversations.append_exchange(
@@ -370,6 +380,65 @@ class FirestoreRepositoryTest(unittest.TestCase):
         self.assertEqual(matches[0][0].id, first.id)
         self.assertGreater(matches[0][1], 0.9)
         self.assertFalse(hasattr(self.memories.get_memory(first.id, "owner"), "embedding"))
+
+    def test_usage_limits_are_atomic_tenant_scoped_and_releasable(self) -> None:
+        day = "2026-08-23"
+        self.assertEqual(self.usage.consume_chat("owner", day=day, limit=1), 1)
+        with self.assertRaises(DailyUsageLimitExceeded):
+            self.usage.consume_chat("owner", day=day, limit=1)
+        self.assertEqual(self.usage.consume_chat("other", day=day, limit=1), 1)
+
+        self.assertEqual(
+            self.usage.reserve_research(
+                "owner",
+                "job-1",
+                day=day,
+                daily_limit=2,
+                active_limit=1,
+                count_daily=True,
+            ),
+            1,
+        )
+        with self.assertRaises(ActiveResearchLimitExceeded):
+            self.usage.reserve_research(
+                "owner",
+                "job-2",
+                day=day,
+                daily_limit=2,
+                active_limit=1,
+                count_daily=True,
+            )
+        self.usage.release_research("owner", "job-1")
+        self.assertEqual(
+            self.usage.reserve_research(
+                "owner",
+                "job-2",
+                day=day,
+                daily_limit=2,
+                active_limit=1,
+                count_daily=True,
+            ),
+            2,
+        )
+        self.usage.rollback_research(
+            "owner",
+            "job-2",
+            day=day,
+            refund_daily=True,
+        )
+        self.assertEqual(
+            self.usage.reserve_research(
+                "owner",
+                "job-3",
+                day=day,
+                daily_limit=2,
+                active_limit=1,
+                count_daily=True,
+            ),
+            2,
+        )
+        self.usage.delete_for_user("owner")
+        self.assertEqual(self.usage.consume_chat("owner", day=day, limit=1), 1)
 
 
 if __name__ == "__main__":

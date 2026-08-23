@@ -111,6 +111,19 @@ test(
       (error) => error?.code === "permission-denied",
     );
 
+    const serverOwnedUsage = doc(
+      owner.database,
+      `usage_limits/${ownerId}/days/2026-08-23`,
+    );
+    await assert.rejects(
+      setDoc(serverOwnedUsage, { chat: 0, research: 0 }),
+      (error) => error?.code === "permission-denied",
+    );
+    await assert.rejects(
+      getDoc(serverOwnedUsage),
+      (error) => error?.code === "permission-denied",
+    );
+
     await Promise.all([deleteApp(owner.app), deleteApp(stranger.app)]);
   },
 );

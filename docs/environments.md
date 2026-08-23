@@ -17,7 +17,7 @@ separate provider boundary.
 | Frontend | Local Node server | Built artifact | Firebase Hosting staging site |
 | API | Local Python server | In-process tests | Cloud Run staging service |
 | Secrets | Shell environment only | No model credentials in required CI | Secret Manager |
-| Model spend | None by default; user-funded opt-in | None in required CI | Existing project billing plus per-job limits |
+| Model spend | None by default; user-funded opt-in | None in required CI | Existing project billing plus per-user and per-job limits |
 
 The current staging project is the final submission environment. A separate
 production project and production data migration are intentionally out of scope.
@@ -43,6 +43,7 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_RESEARCH_DATA_PATH` | `work/local-data/research-jobs.json` | Ignored, atomic research checkpoint path |
 | `MIND_MEMORY_DATA_PATH` | `work/local-data/memories.json` | Ignored, atomic local Memory Ledger path |
 | `MIND_ATTACHMENT_DATA_PATH` | `work/local-data/attachments.json` | Ignored, atomic local attachment metadata path |
+| `MIND_USAGE_DATA_PATH` | `work/local-data/usage.json` | Ignored, atomic local per-user usage ledger |
 | `MIND_FILE_STORAGE_PROVIDER` | `local` | `local` or `gcs`; submission staging requires `gcs` |
 | `MIND_LOCAL_FILE_PATH` | `work/local-files` | Ignored private original-file directory for local development |
 | `MIND_FILE_STORAGE_BUCKET` | unset | Private GCS bucket name required when storage is `gcs` |
@@ -56,6 +57,9 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_ALLOWED_ORIGINS` | Both local frontend origins | Comma-separated exact CORS origins |
 | `MIND_MAX_REQUEST_BYTES` | `64000` | Maximum accepted HTTP request body |
 | `MIND_MAX_CONTEXT_CHARACTERS` | `64000` | Total character budget for the new message plus recent complete conversation turns |
+| `MIND_CHAT_DAILY_LIMIT` | `30` | Maximum Chat requests consumed by one authenticated user per UTC day |
+| `MIND_RESEARCH_DAILY_LIMIT` | `2` | Maximum newly created Research or comparison jobs per authenticated user per UTC day; resumes do not consume another job |
+| `MIND_RESEARCH_MAX_ACTIVE_PER_USER` | `1` | Maximum Research jobs one user may run at the same time |
 | `MIND_MEMORY_RETRIEVAL_LIMIT` | `5` | Maximum relevant confirmed memories selected for one Chat or Research request |
 | `MIND_MEMORY_MAX_CONTEXT_CHARACTERS` | `4000` | Maximum Memory Ledger context added to one model request |
 | `MIND_MEMORY_PROVIDER` | `rules` | `rules` for zero-cost local development or `openai`; submission staging requires `openai` |

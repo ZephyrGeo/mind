@@ -2931,7 +2931,9 @@ function App({ authSession }) {
             : publicMessage,
         }));
         setToast(
-          "Connection interrupted. Reopen the conversation to restore the research task.",
+          error.isApiError
+            ? publicMessage
+            : "Connection interrupted. Reopen the conversation to restore the research task.",
         );
       }
     } finally {

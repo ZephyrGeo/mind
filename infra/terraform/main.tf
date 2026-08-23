@@ -246,6 +246,18 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "MIND_MAX_FILES_PER_REQUEST"
         value = "5"
       }
+      env {
+        name  = "MIND_CHAT_DAILY_LIMIT"
+        value = "30"
+      }
+      env {
+        name  = "MIND_RESEARCH_DAILY_LIMIT"
+        value = "2"
+      }
+      env {
+        name  = "MIND_RESEARCH_MAX_ACTIVE_PER_USER"
+        value = "1"
+      }
 
       env {
         name  = "MIND_MEMORY_RETRIEVAL_LIMIT"

@@ -31,6 +31,8 @@ project for this submission.
 - Persisted Research Jobs and provider response IDs.
 - Refresh recovery, explicit stop, safe restart, and duplicate-message guards.
 - Per-job search-round, tool-call, concurrency, retry, and duration limits.
+- Per-user UTC-day limits: 30 Chat requests, 2 new Research jobs, and 1 active
+  Research job at a time.
 - Used-source-only reports with stable, clickable citation numbering.
 - User-controlled Memory Ledger with semantic retrieval and conflict review.
 - Manual **Compare with latest evidence** from a completed Research report.
@@ -45,7 +47,6 @@ project for this submission.
 - Cloud Tasks background reconciliation or automatic offline advancement.
 - Cloud Scheduler and scheduled Heartbeats.
 - Email, mobile push, or other background notifications.
-- Daily user quotas; existing per-job Research budgets remain.
 - Full usage telemetry, a cost dashboard, or custom Cloud Monitoring dashboards
   and alerts.
 - A separate production project or GitHub Actions production release.
@@ -134,11 +135,14 @@ Harness. This limitation must be stated in the final report.
 - Soft search deadline and hard whole-job timeout.
 - Bounded transport and rate-limit retries.
 - Maximum active Research jobs per user.
+- Thirty Chat requests and two new Research jobs per user per UTC day.
 - File type, size, page, and extracted-text limits.
 - Request ownership and idempotency checks.
 - Server-side secrets, redacted logs, and provider-neutral error messages.
 
-No daily user quota is required for submission.
+Daily counters are persisted server-side and enforced atomically before provider
+work. Resuming an existing Research job does not create a second daily job, while
+new Insight Diff comparisons do.
 
 ## Manual Insight Diff
 
@@ -196,8 +200,8 @@ of Research-derived facts are explicitly omitted.
 Status: completed on 2026-08-23.
 
 - Remove Heartbeats and Voice placeholder controls from the frontend.
-- Remove claims of scheduled automation, production promotion, and daily quotas
-  from canonical documentation.
+- Remove claims of scheduled automation and production promotion from canonical
+  documentation.
 - Keep local/demo files and unrelated user work out of commits.
 
 ### 2. Deterministic verification
@@ -286,9 +290,9 @@ recorded in `docs/submission-readiness.md`.
 - 20 MB maximum raw uploaded file.
 - Cloud Run scale-to-zero with bounded instance concurrency.
 
-Per-job budgets protect Research cost and duration. These assumptions are not a
-promise of validated large-scale capacity; only the documented small
-concurrency check is required before submission.
+Per-user daily limits and per-job budgets protect model cost and duration. These
+assumptions are not a promise of validated large-scale capacity; only the
+documented small concurrency check is required before submission.
 
 ## Definition of done
 

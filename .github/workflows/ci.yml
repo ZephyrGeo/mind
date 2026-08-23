@@ -60,6 +60,7 @@ jobs:
           backend/research_provider.py
           backend/openai_research_provider.py
           backend/research_resilience.py
+          backend/usage_limits.py
           backend/research_service.py
 
       - name: Build and test without model calls

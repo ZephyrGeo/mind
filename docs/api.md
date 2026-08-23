@@ -37,6 +37,22 @@ Development defaults to a local token. Firebase mode verifies ID tokens in
 FastAPI, optionally requires a verified email, and applies the configured email
 allowlist before any tenant-scoped repository operation.
 
+## Per-user usage limits
+
+Before provider work, the API atomically enforces server-owned counters for the
+authenticated user:
+
+- Chat: 30 requests per UTC day by default.
+- Research: 2 newly created Research or comparison jobs per UTC day by default.
+- Active Research: 1 job per user by default.
+
+Daily exhaustion returns HTTP `429` with
+`daily_usage_limit_reached`. Starting a second active Research job returns HTTP
+`409` with `active_research_limit_reached`. The frontend shows the returned safe
+message. Completed, failed, and cancelled Research jobs release their active
+slot. Resuming the same persisted job does not consume a new daily Research job;
+its existing per-job Harness budgets still apply.
+
 ## Chat request
 
 ```json

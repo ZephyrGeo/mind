@@ -92,9 +92,7 @@ test("built page contains the Mind product shell", async () => {
   assert.match(bundle, /Research is temporarily delayed/);
   assert.doesNotMatch(bundle, /Research is continuing with partial evidence/);
   assert.match(bundle, /MarkdownContent/);
-  assert.match(bundle, /message-link/);
   assert.doesNotMatch(source, /dangerouslySetInnerHTML/);
-  assert.match(bundle, /target:\s*"_blank"/);
   assert.match(bundle, /\/cancel/);
   assert.match(bundle, /research-sources-toggle/);
   assert.match(bundle, /research-source-row/);

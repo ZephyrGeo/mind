@@ -130,6 +130,11 @@ total web-search calls, and ten minutes. Runs can therefore take several minutes
 and incur cost. DeepSeek remains the optional Chat provider and is not used by
 Research.
 
+Reviewer-facing deployments also enforce server-side per-user allowances: 30
+Chat requests and 2 newly created Research or comparison jobs per UTC day, with
+only 1 active Research job per user. Existing job resumes do not consume a new
+daily Research job. Per-job search and tool-call budgets still apply.
+
 Current canonical documentation is preferred over legacy guide URLs. Final
 reports must pass an 80% sentence-level citation coverage gate; up to two
 persisted citation-repair Responses run automatically when needed. A useful report
@@ -219,8 +224,8 @@ submission environment. Releases remain deliberate: CI validates each change,
 then `npm run deploy:staging` publishes and smoke-tests the selected revision.
 
 The submission intentionally does not include scheduled Heartbeats, Cloud Tasks
-reconciliation, Cloud Scheduler, notifications, daily user quotas, a cost
-dashboard, custom Cloud Monitoring dashboards, a separate production project,
+reconciliation, Cloud Scheduler, notifications, a cost dashboard, custom Cloud
+Monitoring dashboards, a separate production project,
 automatic production deployment, large-scale load testing, long-term Memory
 decay or full-ledger maintenance, automatic Research refresh, Voice, Google
 Drive, MCP, multi-agent orchestration, or multiple Research providers. Per-job

@@ -17,6 +17,7 @@ DEFAULT_MEMORY_DATA_PATH = PROJECT_ROOT / "work" / "local-data" / "memories.json
 DEFAULT_ATTACHMENT_DATA_PATH = (
     PROJECT_ROOT / "work" / "local-data" / "attachments.json"
 )
+DEFAULT_USAGE_DATA_PATH = PROJECT_ROOT / "work" / "local-data" / "usage.json"
 DEFAULT_LOCAL_FILE_PATH = PROJECT_ROOT / "work" / "local-files"
 DEFAULT_LOCAL_TOKEN = "local-demo-token"
 DEFAULT_ALLOWED_ORIGINS = (
@@ -58,6 +59,7 @@ class Settings:
     research_data_path: Path = DEFAULT_RESEARCH_DATA_PATH
     memory_data_path: Path = DEFAULT_MEMORY_DATA_PATH
     attachment_data_path: Path = DEFAULT_ATTACHMENT_DATA_PATH
+    usage_data_path: Path = DEFAULT_USAGE_DATA_PATH
     file_storage_provider: str = "local"
     local_file_path: Path = DEFAULT_LOCAL_FILE_PATH
     file_storage_bucket: str | None = None
@@ -71,6 +73,9 @@ class Settings:
     )
     max_request_bytes: int = 64_000
     max_context_characters: int = 64_000
+    chat_daily_limit: int = 30
+    research_daily_limit: int = 2
+    research_max_active_per_user: int = 1
     memory_retrieval_limit: int = 5
     memory_max_context_characters: int = 4_000
     memory_provider: str = "rules"
@@ -166,6 +171,14 @@ class Settings:
             raise ValueError("MIND_MAX_REQUEST_BYTES must be positive.")
         if self.max_context_characters < 1:
             raise ValueError("MIND_MAX_CONTEXT_CHARACTERS must be positive.")
+        if not 1 <= self.chat_daily_limit <= 10_000:
+            raise ValueError("MIND_CHAT_DAILY_LIMIT must be between 1 and 10000.")
+        if not 1 <= self.research_daily_limit <= 100:
+            raise ValueError("MIND_RESEARCH_DAILY_LIMIT must be between 1 and 100.")
+        if not 1 <= self.research_max_active_per_user <= 10:
+            raise ValueError(
+                "MIND_RESEARCH_MAX_ACTIVE_PER_USER must be between 1 and 10."
+            )
         if not 1 <= self.memory_retrieval_limit <= 20:
             raise ValueError("MIND_MEMORY_RETRIEVAL_LIMIT must be between 1 and 20.")
         if not 256 <= self.memory_max_context_characters <= 16_000:
@@ -409,6 +422,12 @@ class Settings:
                     str(DEFAULT_ATTACHMENT_DATA_PATH),
                 )
             ),
+            usage_data_path=Path(
+                os.environ.get(
+                    "MIND_USAGE_DATA_PATH",
+                    str(DEFAULT_USAGE_DATA_PATH),
+                )
+            ),
             file_storage_provider=os.environ.get(
                 "MIND_FILE_STORAGE_PROVIDER",
                 "local",
@@ -442,6 +461,15 @@ class Settings:
             ),
             max_context_characters=int(
                 os.environ.get("MIND_MAX_CONTEXT_CHARACTERS", "64000")
+            ),
+            chat_daily_limit=int(
+                os.environ.get("MIND_CHAT_DAILY_LIMIT", "30")
+            ),
+            research_daily_limit=int(
+                os.environ.get("MIND_RESEARCH_DAILY_LIMIT", "2")
+            ),
+            research_max_active_per_user=int(
+                os.environ.get("MIND_RESEARCH_MAX_ACTIVE_PER_USER", "1")
             ),
             memory_retrieval_limit=int(
                 os.environ.get("MIND_MEMORY_RETRIEVAL_LIMIT", "5")

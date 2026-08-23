@@ -74,6 +74,7 @@ from .models import (
     MemoryUpdateRequest,
     ResearchJob,
     ResearchRequest,
+    ResearchStatus,
 )
 from .observability import configure_logging, log_event
 from .openai_research_provider import OpenAIResearchProvider
@@ -93,6 +94,14 @@ from .store import (
     LOCAL_USER_ID,
     ConversationNotFoundError,
     JsonConversationRepository,
+)
+from .usage_limits import (
+    ActiveResearchLimitExceeded,
+    DailyUsageLimitExceeded,
+    FirestoreUsageLimitRepository,
+    JsonUsageLimitRepository,
+    UsageLimitRepository,
+    utc_usage_day,
 )
 
 
@@ -182,6 +191,23 @@ def create_research_repository(settings: Settings) -> ResearchRepository:
         if settings.firebase_project_id is None:
             raise ValueError("Firebase project ID is missing.")
         return FirestoreResearchRepository(
+            project_id=settings.firebase_project_id,
+            database_id=settings.firestore_database_id,
+        )
+    raise ValueError(
+        f"Unsupported persistence provider: {settings.persistence_provider}"
+    )
+
+
+def create_usage_limit_repository(settings: Settings) -> UsageLimitRepository:
+    """Build the server-owned, tenant-scoped usage ledger."""
+
+    if settings.persistence_provider == "json":
+        return JsonUsageLimitRepository(settings.usage_data_path)
+    if settings.persistence_provider == "firestore":
+        if settings.firebase_project_id is None:
+            raise ValueError("Firebase project ID is missing.")
+        return FirestoreUsageLimitRepository(
             project_id=settings.firebase_project_id,
             database_id=settings.firestore_database_id,
         )
@@ -365,6 +391,7 @@ def create_app(
     file_service: FileService | None = None,
     principal_verifier: PrincipalVerifier | None = None,
     account_manager: AccountManager | None = None,
+    usage_limit_repository: UsageLimitRepository | None = None,
 ) -> FastAPI:
     runtime_settings = settings or Settings.from_env()
     runtime_repository = repository or create_conversation_repository(
@@ -376,6 +403,9 @@ def create_app(
     )
     runtime_research_provider = (
         research_provider or create_research_provider(runtime_settings)
+    )
+    runtime_usage_limit_repository = (
+        usage_limit_repository or create_usage_limit_repository(runtime_settings)
     )
     if memory_service is None:
         runtime_memory_repository = memory_repository or create_memory_repository(
@@ -480,6 +510,7 @@ def create_app(
     application.state.embedding_provider = runtime_embedding_provider
     application.state.principal_verifier = runtime_principal_verifier
     application.state.account_manager = runtime_account_manager
+    application.state.usage_limit_repository = runtime_usage_limit_repository
     application.state.attachment_repository = runtime_attachment_repository
     application.state.file_storage = runtime_file_storage
     application.state.file_service = runtime_file_service
@@ -523,6 +554,101 @@ def create_app(
         logger=logger,
     )
     application.state.research_service = research_service
+
+    active_research_statuses = {
+        ResearchStatus.QUEUED,
+        ResearchStatus.PLANNING,
+        ResearchStatus.COLLECTING,
+        ResearchStatus.VERIFYING,
+        ResearchStatus.COMPARING,
+        ResearchStatus.SYNTHESIZING,
+    }
+    terminal_research_statuses = {
+        ResearchStatus.COMPLETED,
+        ResearchStatus.FAILED,
+        ResearchStatus.CANCELLED,
+    }
+
+    def raise_usage_error(error: Exception) -> None:
+        if isinstance(error, DailyUsageLimitExceeded):
+            raise APIError(
+                status_code=429,
+                code="daily_usage_limit_reached",
+                message=(
+                    f"You have reached today's {error.resource} limit "
+                    f"of {error.limit}. The allowance resets at 00:00 UTC."
+                ),
+            ) from None
+        if isinstance(error, ActiveResearchLimitExceeded):
+            raise APIError(
+                status_code=409,
+                code="active_research_limit_reached",
+                message=(
+                    "Finish or stop the current Research task before starting "
+                    "another."
+                ),
+            ) from None
+        raise error
+
+    def reserve_research_usage(
+        user_id: str,
+        job_id: uuid.UUID,
+        *,
+        count_daily: bool,
+    ) -> str:
+        for existing in runtime_research_repository.list_jobs(user_id):
+            if existing.status not in active_research_statuses:
+                continue
+            if existing.id != job_id:
+                raise_usage_error(
+                    ActiveResearchLimitExceeded(
+                        limit=runtime_settings.research_max_active_per_user
+                    )
+                )
+        day = utc_usage_day()
+        try:
+            runtime_usage_limit_repository.reserve_research(
+                user_id,
+                str(job_id),
+                day=day,
+                daily_limit=runtime_settings.research_daily_limit,
+                active_limit=runtime_settings.research_max_active_per_user,
+                count_daily=count_daily,
+            )
+        except (DailyUsageLimitExceeded, ActiveResearchLimitExceeded) as error:
+            raise_usage_error(error)
+        return day
+
+    def release_research_usage(job: ResearchJob) -> None:
+        if job.status in terminal_research_statuses:
+            runtime_usage_limit_repository.release_research(
+                job.user_id,
+                str(job.id),
+            )
+
+    def research_event_stream(
+        job: ResearchJob,
+        user_id: str,
+        *,
+        request_id: str,
+    ) -> Iterator[str]:
+        try:
+            for event in research_service.stream_job(
+                job.id,
+                user_id,
+                request_id=request_id,
+            ):
+                yield _sse_event(event)
+        finally:
+            try:
+                current = runtime_research_repository.get_job(job.id, user_id)
+            except ResearchJobNotFoundError:
+                runtime_usage_limit_repository.release_research(
+                    user_id,
+                    str(job.id),
+                )
+            else:
+                release_research_usage(current)
 
     @application.middleware("http")
     async def request_size_limit(request: Request, call_next: Any) -> Any:
@@ -758,6 +884,7 @@ def create_app(
         responses={
             401: {"model": ErrorResponse},
             413: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
             422: {"model": ErrorResponse},
             503: {"model": ErrorResponse},
         },
@@ -983,21 +1110,18 @@ def create_app(
         conversation_id: uuid.UUID,
         principal: Principal,
     ) -> Response:
-        active_statuses = {
-            "queued",
-            "planning",
-            "collecting",
-            "verifying",
-            "synthesizing",
-        }
         for job in runtime_research_repository.list_jobs(principal.user_id):
             if (
                 job.conversation_id != conversation_id
-                or job.status.value not in active_statuses
+                or job.status not in active_research_statuses
             ):
                 continue
             try:
-                research_service.cancel_job(job.id, principal.user_id)
+                cancelled = research_service.cancel_job(
+                    job.id,
+                    principal.user_id,
+                )
+                release_research_usage(cancelled)
             except ResearchJobConflictError:
                 continue
             except ResearchProviderError as error:
@@ -1054,18 +1178,15 @@ def create_app(
                     ),
                 )
 
-        active_statuses = {
-            "queued",
-            "planning",
-            "collecting",
-            "verifying",
-            "synthesizing",
-        }
         for job in runtime_research_repository.list_jobs(principal.user_id):
-            if job.status.value not in active_statuses:
+            if job.status not in active_research_statuses:
                 continue
             try:
-                research_service.cancel_job(job.id, principal.user_id)
+                cancelled = research_service.cancel_job(
+                    job.id,
+                    principal.user_id,
+                )
+                release_research_usage(cancelled)
             except ResearchJobConflictError:
                 continue
             except ResearchProviderError as error:
@@ -1094,6 +1215,7 @@ def create_app(
         runtime_repository.delete_for_user(principal.user_id)
         runtime_research_repository.delete_for_user(principal.user_id)
         runtime_memory_repository.delete_for_user(principal.user_id)
+        runtime_usage_limit_repository.delete_for_user(principal.user_id)
         try:
             runtime_account_manager.delete_user(principal.user_id)
         except Exception as error:
@@ -1133,7 +1255,9 @@ def create_app(
         principal: Principal,
     ) -> ResearchJob:
         try:
-            return research_service.get_job(job_id, principal.user_id)
+            job = research_service.get_job(job_id, principal.user_id)
+            release_research_usage(job)
+            return job
         except ResearchJobNotFoundError:
             raise APIError(
                 status_code=404,
@@ -1151,7 +1275,9 @@ def create_app(
             },
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
             413: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
             422: {"model": ErrorResponse},
         },
         tags=["research"],
@@ -1162,44 +1288,82 @@ def create_app(
         principal: Principal,
         request: Request,
     ) -> StreamingResponse:
+        job_id = uuid.uuid4()
+        usage_day = reserve_research_usage(
+            principal.user_id,
+            job_id,
+            count_daily=True,
+        )
         try:
-            job = research_service.start_job(payload, principal.user_id)
+            job = research_service.start_job(
+                payload,
+                principal.user_id,
+                job_id=job_id,
+            )
         except ConversationNotFoundError:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(job_id),
+                day=usage_day,
+                refund_daily=True,
+            )
             raise APIError(
                 status_code=404,
                 code="conversation_not_found",
                 message="Conversation does not exist for this user.",
             ) from None
         except AttachmentNotFoundError:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(job_id),
+                day=usage_day,
+                refund_daily=True,
+            )
             raise APIError(
                 status_code=404,
                 code="attachment_not_found",
                 message="Attachment does not exist for this user.",
             ) from None
         except AttachmentNotReadyError as error:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(job_id),
+                day=usage_day,
+                refund_daily=True,
+            )
             raise APIError(
                 status_code=409,
                 code="attachment_not_ready",
                 message=str(error),
             ) from None
         except FileValidationError as error:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(job_id),
+                day=usage_day,
+                refund_daily=True,
+            )
             raise APIError(
                 status_code=422,
                 code=error.code,
                 message=error.public_message,
             ) from None
+        except Exception:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(job_id),
+                day=usage_day,
+                refund_daily=True,
+            )
+            raise
         request_id = _request_id(request)
 
-        def research_events() -> Iterator[str]:
-            for event in research_service.stream_job(
-                job.id,
+        return StreamingResponse(
+            research_event_stream(
+                job,
                 principal.user_id,
                 request_id=request_id,
-            ):
-                yield _sse_event(event)
-
-        return StreamingResponse(
-            research_events(),
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -1222,6 +1386,7 @@ def create_app(
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
             409: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
         },
         tags=["research"],
         operation_id="compareResearchWithLatestEvidence",
@@ -1231,32 +1396,58 @@ def create_app(
         principal: Principal,
         request: Request,
     ) -> StreamingResponse:
+        comparison_job_id = uuid.uuid4()
+        usage_day = reserve_research_usage(
+            principal.user_id,
+            comparison_job_id,
+            count_daily=True,
+        )
         try:
-            job = research_service.start_comparison(job_id, principal.user_id)
+            job = research_service.start_comparison(
+                job_id,
+                principal.user_id,
+                job_id=comparison_job_id,
+            )
         except ResearchJobNotFoundError:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(comparison_job_id),
+                day=usage_day,
+                refund_daily=True,
+            )
             raise APIError(
                 status_code=404,
                 code="research_job_not_found",
                 message="Research job does not exist for this user.",
             ) from None
         except ResearchJobConflictError as error:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(comparison_job_id),
+                day=usage_day,
+                refund_daily=True,
+            )
             raise APIError(
                 status_code=409,
                 code="research_job_conflict",
                 message=str(error),
             ) from None
+        except Exception:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(comparison_job_id),
+                day=usage_day,
+                refund_daily=True,
+            )
+            raise
         request_id = _request_id(request)
 
-        def research_events() -> Iterator[str]:
-            for event in research_service.stream_job(
-                job.id,
+        return StreamingResponse(
+            research_event_stream(
+                job,
                 principal.user_id,
                 request_id=request_id,
-            ):
-                yield _sse_event(event)
-
-        return StreamingResponse(
-            research_events(),
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -1288,38 +1479,65 @@ def create_app(
         principal: Principal,
         request: Request,
     ) -> StreamingResponse:
+        usage_day = reserve_research_usage(
+            principal.user_id,
+            job_id,
+            count_daily=False,
+        )
         try:
             job = research_service.prepare_resume(job_id, principal.user_id)
         except ResearchJobNotFoundError:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(job_id),
+                day=usage_day,
+                refund_daily=False,
+            )
             raise APIError(
                 status_code=404,
                 code="research_job_not_found",
                 message="Research job does not exist for this user.",
             ) from None
         except ResearchJobConflictError as error:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(job_id),
+                day=usage_day,
+                refund_daily=False,
+            )
             raise APIError(
                 status_code=409,
                 code="research_job_conflict",
                 message=str(error),
             ) from None
         except ResearchProviderError as error:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(job_id),
+                day=usage_day,
+                refund_daily=False,
+            )
             raise APIError(
                 status_code=503 if error.retryable else 502,
                 code=error.code,
                 message=error.public_message,
             ) from None
+        except Exception:
+            runtime_usage_limit_repository.rollback_research(
+                principal.user_id,
+                str(job_id),
+                day=usage_day,
+                refund_daily=False,
+            )
+            raise
         request_id = _request_id(request)
 
-        def research_events() -> Iterator[str]:
-            for event in research_service.stream_job(
-                job.id,
+        return StreamingResponse(
+            research_event_stream(
+                job,
                 principal.user_id,
                 request_id=request_id,
-            ):
-                yield _sse_event(event)
-
-        return StreamingResponse(
-            research_events(),
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -1344,7 +1562,9 @@ def create_app(
         principal: Principal,
     ) -> ResearchJob:
         try:
-            return research_service.cancel_job(job_id, principal.user_id)
+            job = research_service.cancel_job(job_id, principal.user_id)
+            release_research_usage(job)
+            return job
         except ResearchJobNotFoundError:
             raise APIError(
                 status_code=404,
@@ -1375,6 +1595,7 @@ def create_app(
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
             413: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
             422: {"model": ErrorResponse},
         },
         tags=["conversations"],
@@ -1409,6 +1630,15 @@ def create_app(
                 code=error.code,
                 message=error.public_message,
             ) from None
+        usage_day = utc_usage_day()
+        try:
+            runtime_usage_limit_repository.consume_chat(
+                principal.user_id,
+                day=usage_day,
+                limit=runtime_settings.chat_daily_limit,
+            )
+        except DailyUsageLimitExceeded as error:
+            raise_usage_error(error)
         user_id_hash = hashlib.sha256(
             principal.user_id.encode("utf-8")
         ).hexdigest()[:16]
@@ -1541,6 +1771,10 @@ def create_app(
                     }
                 )
             except ConversationNotFoundError:
+                runtime_usage_limit_repository.rollback_chat(
+                    principal.user_id,
+                    day=usage_day,
+                )
                 yield _sse_event(
                     {
                         "type": "error",

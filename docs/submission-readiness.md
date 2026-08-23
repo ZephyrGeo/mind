@@ -108,11 +108,12 @@ requires an explicit confirmation because it removes cloud data.
 - Research depends on server-side OpenAI credit and model access. Quota
   exhaustion fails immediately with a non-retryable safe error.
 - Chat depends on the configured DeepSeek key and account balance.
-- Daily user quotas, full cost telemetry, custom monitoring dashboards and
-  alerts, scheduled Heartbeats, notifications, a separate production project,
-  large-scale load testing, long-term Memory decay/cleanup, automatic Research
-  refresh, Voice, Google Drive, MCP, multi-agent orchestration, and multiple
-  Research providers are outside the submission scope.
+- Full cost telemetry, custom monitoring dashboards and alerts, scheduled
+  Heartbeats, notifications, a separate production project, large-scale load
+  testing, long-term Memory decay/cleanup, automatic Research refresh, Voice,
+  Google Drive, MCP, multi-agent orchestration, and multiple Research providers
+  are outside the submission scope. Per-user Chat and Research limits are
+  enforced server-side.
 
 ## Zero-cost Insight Diff demonstration
 
