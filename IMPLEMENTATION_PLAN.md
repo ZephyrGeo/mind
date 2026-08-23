@@ -244,6 +244,9 @@ from scale-to-zero; the immediate warm repeat recorded a 65.3 ms p95. See
 
 ### 4. Staging release and reviewer smoke test
 
+Status: deployed on 2026-08-23; public and security smoke checks passed.
+Authenticated provider-backed checks remain pending a signed-in reviewer session.
+
 - Deploy the selected revision with `npm run deploy:staging`.
 - Verify API health and Firebase Hosting.
 - Create and authenticate a reviewer account.
@@ -252,6 +255,10 @@ from scale-to-zero; the immediate warm repeat recorded a 65.3 ms p95. See
 - Confirm secrets and private files are not exposed to the browser or repository.
 
 ### 5. Final documentation
+
+Status: in progress. The deployment, automated verification, capacity evidence,
+known limitations, and authenticated reviewer checklist are recorded in
+`docs/submission-readiness.md`.
 
 - Record the staging URL and reviewer journey.
 - Explain OpenAI versus Mind Harness ownership.
