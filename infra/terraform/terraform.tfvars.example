@@ -4,7 +4,7 @@ environment         = "staging"
 allowed_user_emails = "owner@example.com"
 
 # Fill these after the first Hosting/API URL is known.
-allowed_origins  = "https://mind-staging-ce427.web.app"
+allowed_origins  = "https://mind-staging-ce427.web.app,https://mind-staging-ce427.firebaseapp.com,http://localhost:3000"
 api_image        = "asia-northeast1-docker.pkg.dev/mind-staging-ce427/mind-api/mind-api@sha256:replace-me"
 deploy_cloud_run = false
 

@@ -18,9 +18,10 @@ const serviceAccountName = "mind-api-staging";
 const serviceAccount = `${serviceAccountName}@${projectId}.iam.gserviceaccount.com`;
 const buildServiceAccountName = "mind-build-staging";
 const buildServiceAccount = `${buildServiceAccountName}@${projectId}.iam.gserviceaccount.com`;
-const hostingOrigins = [
+const allowedOrigins = [
   `https://${projectId}.web.app`,
   `https://${projectId}.firebaseapp.com`,
+  "http://localhost:3000",
 ].join(",");
 const bundledGcloud = "/Users/fuyimin/Documents/Codex/tools/google-cloud-sdk/bin/gcloud";
 const gcloud = process.env.GCLOUD ?? (existsSync(bundledGcloud) ? bundledGcloud : "gcloud");
@@ -401,7 +402,7 @@ const envFlag = gcloudDictionary([
   `MIND_EMBEDDING_MODEL=${process.env.MIND_EMBEDDING_MODEL ?? "text-embedding-3-small"}`,
   `MIND_EMBEDDING_DIMENSIONS=${process.env.MIND_EMBEDDING_DIMENSIONS ?? "256"}`,
   `MIND_MEMORY_SEMANTIC_THRESHOLD=${process.env.MIND_MEMORY_SEMANTIC_THRESHOLD ?? "0.68"}`,
-  `MIND_ALLOWED_ORIGINS=${hostingOrigins}`,
+  `MIND_ALLOWED_ORIGINS=${allowedOrigins}`,
   "MIND_MODEL_PROVIDER=deepseek",
   `MIND_DEEPSEEK_MODEL=${process.env.MIND_DEEPSEEK_MODEL ?? "deepseek-v4-flash"}`,
   "MIND_RESEARCH_PROVIDER=openai",

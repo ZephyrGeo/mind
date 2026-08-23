@@ -22,6 +22,9 @@ separate provider boundary.
 The current staging project is the final submission environment. A separate
 production project and production data migration are intentionally out of scope.
 Submission data must never be copied into local development or test fixtures.
+The staging API accepts the two Firebase Hosting origins and
+`http://localhost:3000` for local browser QA; no other localhost port is
+allowed.
 
 ## Current local variables
 

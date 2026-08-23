@@ -88,6 +88,7 @@ test("staging grants the API Firebase Auth access and mounts model secrets", asy
   assert.match(deployScript, /--soft-delete-duration=0/);
   assert.match(deployScript, /ensureMemoryVectorIndex/);
   assert.match(deployScript, /collection-group["',\s]+memories/);
+  assert.match(deployScript, /http:\/\/localhost:3000/);
   assert.match(terraform, /google_firestore_index" "memory_embedding/);
   assert.match(terraform, /vector_config/);
   assert.match(deployScript, /OPENAI_API_KEY=.*:latest/);
