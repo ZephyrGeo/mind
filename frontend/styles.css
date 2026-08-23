@@ -1717,6 +1717,13 @@ select:focus-visible {
   padding-left: 1em;
 }
 
+.markdown-content hr {
+  height: 1px;
+  margin: 1.5rem 0;
+  border: 0;
+  background: var(--border);
+}
+
 .message-link {
   color: #175cd3;
   overflow-wrap: anywhere;

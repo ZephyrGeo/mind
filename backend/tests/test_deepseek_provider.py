@@ -57,6 +57,9 @@ class DeepSeekProviderTest(unittest.TestCase):
         )
         body = json.loads(request.data.decode("utf-8"))
         self.assertEqual(body["model"], "deepseek-v4-flash")
+        system_prompt = body["messages"][0]["content"]
+        self.assertIn("Do not output Markdown horizontal rules", system_prompt)
+        self.assertIn("Use fenced code blocks only for actual code", system_prompt)
         self.assertEqual(body["messages"][-1], {"role": "user", "content": "你好"})
         self.assertEqual(body["thinking"], {"type": "disabled"})
         self.assertTrue(body["stream"])

@@ -45,6 +45,16 @@ test("streaming Markdown safely renders incomplete list markers", () => {
   }
 });
 
+test("Markdown separators render as rules instead of raw characters", () => {
+  for (const content of ["---", "****", "_____"]) {
+    const html = renderToStaticMarkup(
+      React.createElement(MarkdownContent, { content }),
+    );
+
+    assert.equal(html, '<div class="markdown-content"><hr/></div>');
+  }
+});
+
 test("every streaming prefix of a structured answer can render", () => {
   const answer = [
     "这份 PDF 是一份个人简历，主要内容如下：",
@@ -56,6 +66,33 @@ test("every streaming prefix of a structured answer can render", () => {
     "**项目经历**",
     "1. **RAG 助手**：构建带引用的文档问答流程。",
     "2. **Research Agent**：在综合前核查证据。",
+  ].join("\n");
+
+  for (let end = 0; end <= answer.length; end += 1) {
+    assert.doesNotThrow(() =>
+      renderToStaticMarkup(
+        React.createElement(MarkdownContent, {
+          content: answer.slice(0, end),
+        }),
+      ),
+    );
+  }
+});
+
+test("a bare list marker after a completed code fence cannot stall streaming", () => {
+  const answer = [
+    "## 三、简历结构层面的改进",
+    "",
+    "建议增加：",
+    "",
+    "```text",
+    "AI Engineer | 专注 LLM 应用开发与 RAG 系统落地",
+    "- 3年 AI 应用开发经验",
+    "```",
+    "",
+    "2. 时间线断档需要弥补",
+    "",
+    "- ",
   ].join("\n");
 
   for (let end = 0; end <= answer.length; end += 1) {

@@ -2,6 +2,29 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
+test("hosting revalidates stable frontend asset names after deployment", async () => {
+  const firebase = JSON.parse(
+    await readFile(new URL("../firebase.json", import.meta.url), "utf8"),
+  );
+  const headersBySource = new Map(
+    firebase.hosting.headers.map((rule) => [rule.source, rule.headers]),
+  );
+
+  for (const source of [
+    "/index.html",
+    "/runtime-config.js",
+    "/assets/app.js",
+    "/assets/styles.css",
+  ]) {
+    assert.deepEqual(headersBySource.get(source), [
+      {
+        key: "Cache-Control",
+        value: "no-cache, max-age=0, must-revalidate",
+      },
+    ]);
+  }
+});
+
 test("built page contains the Mind product shell", async () => {
   const html = await readFile(
     new URL("../dist/index.html", import.meta.url),
