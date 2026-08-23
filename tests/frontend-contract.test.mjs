@@ -35,6 +35,9 @@ test("built page contains the Mind product shell", async () => {
   assert.match(bundle, /This cannot be undone/);
   assert.match(bundle, /Search conversations/);
   assert.match(bundle, /Chats and researches/);
+  assert.doesNotMatch(source, /Heartbeats/);
+  assert.doesNotMatch(source, /Voice input/);
+  assert.doesNotMatch(source, /name:\s*"microphone"/);
   assert.doesNotMatch(bundle, /conversation\.mode === "research"/);
   assert.match(bundle, /conversationsCollapsed/);
   assert.match(bundle, /name:\s*"caret-down"/);

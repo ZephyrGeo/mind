@@ -1,7 +1,7 @@
 # Mind Personal Agent
 
 Mind is an original personal AI workspace for transparent conversations,
-deep research, explainable memory, and guarded autonomous routines.
+deep research, explainable memory, and evidence-change tracking.
 
 This repository contains the local vertical slice and FastAPI Agent Kernel.
 Chat defaults to a zero-cost Fake ModelProvider and can opt in to DeepSeek.
@@ -19,7 +19,10 @@ Deep Research uses an independent OpenAI ResearchProvider.
   cited synthesis, persisted per-subtask recovery, bounded exponential backoff,
   two-worker search concurrency, soft/hard deadlines, partial-evidence completion,
   context reduction, and cancel-all semantics
-- Searchable, time-grouped conversation history with no display cap
+- Manual Insight Diff that freezes a completed report as the baseline, runs the
+  same Research Brief against current evidence, preserves both report snapshots,
+  and classifies claim-level changes as New, Changed, Contradicted, or Stale
+- Searchable, expandable conversation history with no display cap
 - Reopenable conversations after a page reload
 - Confirmed, tenant-scoped deletion of conversation history
 - Firebase registration, email verification, login, logout, and account deletion
@@ -50,7 +53,7 @@ Deep Research uses an independent OpenAI ResearchProvider.
 Requirements:
 
 - Node.js 22 or newer
-- Python 3.10 or newer; Python 3.12 is the production and CI baseline
+- Python 3.10 or newer; Python 3.12 is the deployment and CI baseline
 
 ```bash
 npm ci
@@ -97,7 +100,7 @@ After that, normal startup automatically loads `.env.local`:
 npm run dev
 ```
 
-Deep Research has one production provider: OpenAI. To enable it locally, add:
+Deep Research has one deployed provider: OpenAI. To enable it locally, add:
 
 ```dotenv
 OPENAI_API_KEY=<your OpenAI API key>
@@ -105,7 +108,7 @@ MIND_RESEARCH_PROVIDER=openai
 MIND_RESEARCH_MODEL=gpt-5.6-terra
 ```
 
-To test the production Memory path locally with the same OpenAI key, also add:
+To test the deployed Memory path locally with the same OpenAI key, also add:
 
 ```dotenv
 MIND_MEMORY_PROVIDER=openai
@@ -115,8 +118,8 @@ MIND_EMBEDDING_MODEL=text-embedding-3-small
 ```
 
 Without those Memory overrides, local development intentionally uses the
-zero-cost deterministic extractor and embedding fallback. Staging and
-production require the OpenAI implementations.
+zero-cost deterministic extractor and embedding fallback. Submission staging
+requires the OpenAI implementations.
 
 Research runs several bounded background OpenAI Responses. Mind plans and
 coordinates the stages. Attached files first pass through an isolated, no-tool
@@ -193,10 +196,25 @@ Then open <http://127.0.0.1:8000/docs>.
 3. DeepSeek streaming provider and multi-turn conversations — complete
 4. Local checkpointed Deep Research MVP — complete
 5. Firebase Authentication and Firestore foundation — complete
-6. TXT and PDF file input — complete; voice remains deferred
-7. Intelligent Memory Ledger — complete MVP; Heartbeats and Insight Diff follow
-8. Production research workers, Terraform, CI/CD, monitoring, and report
+6. TXT and PDF file input — complete
+7. Intelligent Memory Ledger and manual Insight Diff — complete MVP
+8. Submission staging smoke test, small concurrency check, and final documentation
 
 Fake and DeepSeek Chat providers share `ModelProvider`. OpenAI Research uses the
 separate `ResearchProvider` boundary. The JSON repositories can likewise be
 replaced by Firestore without rewriting the user experience.
+
+## Final submission scope
+
+The current stable Firebase Hosting and Cloud Run staging deployment is the
+submission environment. Releases remain deliberate: CI validates each change,
+then `npm run deploy:staging` publishes and smoke-tests the selected revision.
+
+The submission intentionally does not include scheduled Heartbeats, Cloud Tasks
+reconciliation, Cloud Scheduler, notifications, daily user quotas, a cost
+dashboard, custom Cloud Monitoring dashboards, a separate production project,
+automatic production deployment, large-scale load testing, long-term Memory
+decay or full-ledger maintenance, automatic Research refresh, Voice, Google
+Drive, MCP, multi-agent orchestration, or multiple Research providers. Per-job
+Research budgets, cancellation, persisted response IDs, refresh recovery, and
+the manual **Compare with latest evidence** flow remain in scope.

@@ -6,22 +6,22 @@ separate provider boundary.
 
 ## Environment matrix
 
-| Setting | Development | Test / CI | Staging | Production |
-|---|---|---|---|---|
-| Purpose | Local product work | Deterministic verification | Integrated pre-release checks | Approved users |
-| Chat provider | Fake or opt-in DeepSeek | Fake or mocked DeepSeek only | DeepSeek with a capped evaluation budget | DeepSeek with user quotas |
-| Research provider | OpenAI when configured | Mock OpenAI only | OpenAI with a capped evaluation budget | OpenAI with user quotas |
-| Authentication | Local bearer token | In-process test token | Firebase Authentication plus allowlist | Firebase Authentication plus allowlist |
-| Conversation store | Ignored local JSON | Temporary test directory | Firestore staging database | Firestore production database |
-| File store | Ignored local directory | Temporary fixtures | Dedicated private staging bucket | Dedicated private production bucket |
-| Frontend | Local Node server | Built artifact | Firebase Hosting preview/staging site | Firebase Hosting production site |
-| API | Local Python server | In-process tests | Dedicated Cloud Run service | Dedicated Cloud Run service |
-| Secrets | Shell environment only | CI secret store when required | Secret Manager | Secret Manager |
-| Model spend | None by default; user-funded opt-in | None in required CI | Hard daily cap and kill switch | Per-user and global caps |
+| Setting | Development | Test / CI | Submission staging |
+|---|---|---|---|
+| Purpose | Local product work | Deterministic verification | Reviewer-facing integrated deployment |
+| Chat provider | Fake or opt-in DeepSeek | Fake or mocked DeepSeek only | DeepSeek with controlled project billing |
+| Research provider | OpenAI when configured | Mock OpenAI only | OpenAI with per-job budgets |
+| Authentication | Local bearer token | In-process test token | Firebase Authentication plus allowlist |
+| Conversation store | Ignored local JSON | Temporary test directory | Firestore `(default)` database |
+| File store | Ignored local directory | Temporary fixtures | Private staging bucket |
+| Frontend | Local Node server | Built artifact | Firebase Hosting staging site |
+| API | Local Python server | In-process tests | Cloud Run staging service |
+| Secrets | Shell environment only | No model credentials in required CI | Secret Manager |
+| Model spend | None by default; user-funded opt-in | None in required CI | Existing project billing plus per-job limits |
 
-Staging and production must use separate GCP resources, service accounts,
-databases, storage buckets, OAuth credentials, and budgets. Production data must
-never be copied into local development or test fixtures.
+The current staging project is the final submission environment. A separate
+production project and production data migration are intentionally out of scope.
+Submission data must never be copied into local development or test fixtures.
 
 ## Current local variables
 
@@ -32,18 +32,18 @@ exported in the terminal takes precedence over the same variable in the file.
 | Variable | Default | Scope |
 |---|---|---|
 | `MIND_ENV` | `development` in the example | Environment label reserved for upcoming configuration validation |
-| `MIND_AUTH_PROVIDER` | `local` | `local` or `firebase`; staging/production require Firebase |
-| `MIND_LOCAL_TOKEN` | `local-demo-token` | Shared local-only bearer token; never valid for staging or production |
+| `MIND_AUTH_PROVIDER` | `local` | `local` or `firebase`; submission staging requires Firebase |
+| `MIND_LOCAL_TOKEN` | `local-demo-token` | Shared local-only bearer token; never valid for submission staging |
 | `MIND_FIREBASE_PROJECT_ID` | unset | Firebase/GCP project used for token verification and Firestore |
 | `MIND_ALLOWED_USER_EMAILS` | unset | Comma-separated restricted-access allowlist |
 | `MIND_REQUIRE_VERIFIED_EMAIL` | `0` | Require Firebase email verification when set to `1` |
-| `MIND_PERSISTENCE_PROVIDER` | `json` | `json` or `firestore`; staging/production require Firestore |
+| `MIND_PERSISTENCE_PROVIDER` | `json` | `json` or `firestore`; submission staging requires Firestore |
 | `MIND_FIRESTORE_DATABASE_ID` | `(default)` | Firestore database ID |
 | `MIND_DATA_PATH` | `work/local-data/conversations.json` | Ignored JSON persistence path |
 | `MIND_RESEARCH_DATA_PATH` | `work/local-data/research-jobs.json` | Ignored, atomic research checkpoint path |
 | `MIND_MEMORY_DATA_PATH` | `work/local-data/memories.json` | Ignored, atomic local Memory Ledger path |
 | `MIND_ATTACHMENT_DATA_PATH` | `work/local-data/attachments.json` | Ignored, atomic local attachment metadata path |
-| `MIND_FILE_STORAGE_PROVIDER` | `local` | `local` or `gcs`; staging/production require `gcs` |
+| `MIND_FILE_STORAGE_PROVIDER` | `local` | `local` or `gcs`; submission staging requires `gcs` |
 | `MIND_LOCAL_FILE_PATH` | `work/local-files` | Ignored private original-file directory for local development |
 | `MIND_FILE_STORAGE_BUCKET` | unset | Private GCS bucket name required when storage is `gcs` |
 | `MIND_MAX_FILE_BYTES` | `20000000` | Maximum raw bytes accepted for one TXT or PDF |
@@ -58,11 +58,11 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_MAX_CONTEXT_CHARACTERS` | `64000` | Total character budget for the new message plus recent complete conversation turns |
 | `MIND_MEMORY_RETRIEVAL_LIMIT` | `5` | Maximum relevant confirmed memories selected for one Chat or Research request |
 | `MIND_MEMORY_MAX_CONTEXT_CHARACTERS` | `4000` | Maximum Memory Ledger context added to one model request |
-| `MIND_MEMORY_PROVIDER` | `rules` | `rules` for zero-cost local development or `openai`; staging/production require `openai` |
+| `MIND_MEMORY_PROVIDER` | `rules` | `rules` for zero-cost local development or `openai`; submission staging requires `openai` |
 | `MIND_MEMORY_MODEL` | `gpt-5.4-mini` | OpenAI model used for strict durable-memory extraction and reconciliation |
 | `MIND_MEMORY_REASONING_EFFORT` | `low` | Reasoning effort for Memory extraction |
 | `MIND_MEMORY_TIMEOUT_SECONDS` | `45` | Timeout for one Memory extraction or embedding request |
-| `MIND_EMBEDDING_PROVIDER` | `local` | Deterministic local fallback or `openai`; staging/production require `openai` |
+| `MIND_EMBEDDING_PROVIDER` | `local` | Deterministic local fallback or `openai`; submission staging requires `openai` |
 | `MIND_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model for multilingual semantic retrieval |
 | `MIND_EMBEDDING_DIMENSIONS` | `256` | Vector dimensions; must match the Firestore Memory vector index |
 | `MIND_MEMORY_SEMANTIC_THRESHOLD` | `0.68` | Minimum cosine similarity for semantic retrieval before lexical bonuses |
@@ -72,8 +72,8 @@ exported in the terminal takes precedence over the same variable in the file.
 | `MIND_DEEPSEEK_MODEL` | `deepseek-v4-flash` | Hosted model ID; `deepseek-v4-pro` is the higher-cost option |
 | `MIND_DEEPSEEK_TIMEOUT_SECONDS` | `120` | Per-request upstream timeout |
 | `MIND_DEEPSEEK_MAX_TOKENS` | `2048` | Maximum generated tokens for one response |
-| `MIND_RESEARCH_PROVIDER` | `openai` | Provider selector retained as an abstraction boundary; `openai` is the only production value |
-| `OPENAI_API_KEY` | unset | Required to start local Research and required at startup in staging/production |
+| `MIND_RESEARCH_PROVIDER` | `openai` | Provider selector retained as an abstraction boundary; `openai` is the only deployed value |
+| `OPENAI_API_KEY` | unset | Required to start local Research and required at startup in submission staging |
 | `MIND_OPENAI_BASE_URL` | `https://api.openai.com/v1` | HTTPS Responses API origin; credentials in URLs are rejected |
 | `MIND_RESEARCH_MODEL` | `gpt-5.6-terra` | OpenAI model used for background Research |
 | `MIND_RESEARCH_REASONING_EFFORT` | `high` | Reasoning effort sent with the Responses API request |
@@ -136,7 +136,7 @@ provider boundaries remain independent. Existing memories are embedded lazily
 in bounded batches on first retrieval; new and edited memories are embedded
 when saved.
 
-Research does not use the Chat DeepSeek key and has no alternate production
+Research does not use the Chat DeepSeek key and has no alternate deployed
 search provider. In development, the API can still start without an OpenAI key
 so Chat remains usable, but health reports Research as unavailable and a
 Research request fails closed.
@@ -162,7 +162,7 @@ npm run dev:firebase
 
 Do not place real keys in `.env.example`, source control, frontend code, or
 support messages. `Settings` fails at startup when DeepSeek Chat is selected
-without its key; staging and production also require OpenAI Memory extraction,
+without its key; submission staging also requires OpenAI Memory extraction,
 OpenAI embeddings, and the OpenAI Research key.
 `/api/health` separately reports Chat and Research billing/readiness. Only
 `npm run dev` loads `.env.local`; tests deliberately ignore it so required CI
@@ -183,7 +183,7 @@ Tests that write data must use temporary paths rather than
 `work/local-data/conversations.json` or
 `work/local-data/research-jobs.json`.
 
-## Staging and production rules
+## Submission staging rules
 
 Later deployment code must fail closed when required configuration is missing.
 It must not fall back to the local token, Fake Agent, local JSON data, permissive
@@ -209,17 +209,17 @@ Git ignores `.env` and every `.env.*` file except the redacted
 `.env.example`. Terraform state, generated credentials, and provider cache files
 will be ignored when Terraform is introduced.
 
-## Promotion contract
+## Release contract
 
-The intended release path is:
+The final submission release path is:
 
 1. Pull requests run the zero-cost build and test suite.
-2. Merges to `main` deploy immutable artifacts to staging.
-3. Staging smoke tests verify authentication, API health, and tenant isolation.
-4. Production promotion requires approval and reuses the tested artifacts.
-5. A failed production health check rolls back to the previous Cloud Run
-   revision and Firebase Hosting release.
+2. The selected revision is deployed deliberately with `npm run deploy:staging`.
+3. The deployment script verifies API health before reporting the staging URLs.
+4. A reviewer smoke test covers authentication, Chat, file input, Research,
+   Memory, manual Insight Diff, refresh recovery, and cancellation.
 
-The exact GCP project IDs, regions, allowed identities, budgets, and public URLs
-will be supplied through Terraform variables or the deployment environment and
-must not be hard-coded in application source.
+There is no automatic production promotion or separate production project in
+the submission scope. The exact staging project ID, region, allowed identities,
+budgets, and public URLs come from deployment configuration rather than
+application source.

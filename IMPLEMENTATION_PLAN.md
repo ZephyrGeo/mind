@@ -1,784 +1,286 @@
-# Mind Personal Agent — Submission-Oriented Harness Implementation Plan
+# Mind Personal Agent — Final Submission Plan
+
+Updated: 2026-08-23
 
 ## Product direction
 
-Mind owns research depth through a durable multi-stage Harness. OpenAI provides
-replaceable model inference, background Responses, and built-in web search; Mind
-plans, fans out, verifies, follows evidence gaps, and synthesizes the result:
+Mind is a personal AI workspace for conversations, evidence-backed research,
+user-controlled memory, and structured tracking of how research conclusions
+change over time.
 
-    Conversation or file input
-            ↓
-    Relevant user-controlled memory
-            ↓
-    Research Brief and 4–8 subquestions
-            ↓
-    Parallel Terra + OpenAI Web Search Responses
-            ↓
-    Evidence-gap and conflict verification
-            ↓
-    Optional bounded second search round
-            ↓
-    Unified cited synthesis
-            ↓
-    Durable job state, citations, sources, and report
-            ↓
-    User enables Track this topic
-            ↓
-    Heartbeat periodically creates a new research snapshot
-            ↓
-    Insight Diff identifies what is new, changed, contradicted, or stale
-            ↓
-    Notify the user and update memory with permission
+OpenAI supplies replaceable model inference, background Responses, and built-in
+web search. Mind owns the Research Harness: planning, bounded parallel search,
+evidence verification, conflict checks, synthesis, persistence, recovery,
+cancellation, source normalization, report snapshots, and Insight Diff.
 
-Product statement:
+The submission focuses on a complete reviewer journey instead of expanding the
+system with additional automation or infrastructure.
 
-> Mind remembers what matters to you, researches it with traceable evidence, and
-> keeps watching for what changes.
+## Final scope decision
 
-The model API is replaceable infrastructure. Mind owns identity, inputs, context,
-workflow state, permissions, budgets, recovery, persistence, personalization,
-automation, evaluation, and user experience.
+The current stable Firebase Hosting and Cloud Run staging deployment is the
+submission environment. It will not be promoted to a separate production
+project for this submission.
 
-## Ownership boundary
+### Included
 
-### OpenAI owns
+- Firebase registration, verification, login, logout, and account deletion.
+- Tenant-scoped Chat conversations with the configured Chat provider.
+- TXT and PDF upload with private storage, bounded extraction, and provenance.
+- The OpenAI-backed multi-stage Research Harness.
+- Persisted Research Jobs and provider response IDs.
+- Refresh recovery, explicit stop, safe restart, and duplicate-message guards.
+- Per-job search-round, tool-call, concurrency, retry, and duration limits.
+- Used-source-only reports with stable, clickable citation numbering.
+- User-controlled Memory Ledger with semantic retrieval and conflict review.
+- Manual **Compare with latest evidence** from a completed Research report.
+- Immutable baseline and latest report snapshots.
+- Claim-level `New`, `Changed`, `Contradicted`, and `Stale` Insight Diff with
+  evidence preserved on both sides.
+- Deterministic CI, Terraform validation, one-command staging deployment, a
+  reviewer smoke test, and one small concurrency test.
 
-- Replaceable model inference for each bounded Harness task.
-- Built-in web search and data exploration for search tasks.
-- Inline URL citations and complete web-source metadata.
-- Background Response execution, retrieval, and cancellation.
+### Deliberately omitted
 
-### Mind owns
+- Cloud Tasks background reconciliation or automatic offline advancement.
+- Cloud Scheduler and scheduled Heartbeats.
+- Email, mobile push, or other background notifications.
+- Daily user quotas; existing per-job Research budgets remain.
+- Full usage telemetry, a cost dashboard, or custom Cloud Monitoring dashboards
+  and alerts.
+- A separate production project or GitHub Actions production release.
+- Large-scale load testing.
+- Long-term Memory decay, full-ledger cleanup, and automatic Research refresh.
+- Voice, Google Drive, MCP, multi-agent orchestration, and multiple Research
+  providers.
+- Further non-blocking visual polish after the reviewer journey is stable.
 
-- ResearchProvider abstraction.
-- Research Brief generation and subquestion decomposition.
-- Multi-Response fan-out, evidence aggregation, and stage transitions.
-- Evidence-gap and conflict checks plus the optional second search round.
-- Final report synthesis with stable Mind source markers.
-- Authenticated user and tenant boundaries.
-- Research Job lifecycle and durable state machine.
-- OpenAI response ID persistence, retrieval, cancellation, and restart policy.
-- Prompt, file, conversation, and memory context assembly.
-- Citation and source normalization, validation, persistence, and display.
-- Quotas, concurrency, duration, tool-call, and cost controls.
-- Browser disconnect recovery and idempotency.
-- Report snapshots, Memory Ledger, Research Watch, and Insight Diff.
-- Observability, testing, deployment, and security.
+These are explicit product decisions, not incomplete acceptance criteria.
 
-Mind will not build a crawler, search index, or alternate production search
-provider. It coordinates OpenAI Web Search through `ResearchProvider` tasks and
-does not depend on a specialized Deep Research model. Normal Chat may continue
-using DeepSeek and is outside the Research provider decision.
+## Acceptance map
 
-## Assignment acceptance map
-
-| Assignment requirement | Mind implementation |
+| Requirement | Submission implementation |
 | --- | --- |
-| Conversational LLM instructions and responses | Existing Chat experience with the configured Chat ModelProvider |
+| Conversational LLM | Existing Chat experience and `ModelProvider` boundary |
 | Deep Research | OpenAI Responses API plus the Mind Research Harness |
-| Registration, login, logout, and account deletion | Firebase Authentication and an account-deletion workflow |
-| Non-text input | Bounded TXT and PDF upload through Cloud Storage |
+| Identity | Firebase Authentication and account deletion |
+| Non-text input | Bounded TXT and PDF upload through private Cloud Storage |
 | Original feature 1 | User-controlled Memory Ledger |
-| Original feature 2 | Research Watch plus Heartbeat and Insight Diff |
-| Web application | React frontend |
-| Restricted access | Firebase identity plus production allowlist or active-user status |
-| Python backend | FastAPI |
-| Google Cloud and IaC | Cloud Run, Firestore, Cloud Storage, Cloud Tasks, Cloud Scheduler, Secret Manager, Firebase Hosting, and Terraform |
-| CI and CD | GitHub Actions with staging deployment and controlled production promotion |
-| Production assumptions | Explicit capacity, quota, scaling, and load-test targets |
-| Deliverables | Production URL, Google Doc report, and GitHub source repository |
+| Original feature 2 | Manual Insight Diff between immutable Research snapshots |
+| Web application | React frontend with FastAPI backend |
+| Restricted access | Firebase identity plus configured allowlist |
+| Persistence | Firestore for submission staging; JSON for local development |
+| Google Cloud | Firebase Hosting, Cloud Run, Firestore, Cloud Storage, Secret Manager |
+| IaC and CI | Terraform validation and deterministic GitHub Actions checks |
+| Deployment | Deliberate `npm run deploy:staging` release and smoke test |
+| Capacity evidence | Documented assumptions and one small concurrency test |
+
+## Research Harness
+
+### Ownership boundary
+
+OpenAI owns model inference, web search, background Response execution,
+retrieval, and cancellation. Mind owns:
+
+- the `ResearchProvider` interface and provider-neutral job model;
+- Research Brief generation and 4–6 bounded subquestions;
+- parallel search scheduling within the per-job concurrency limit;
+- evidence aggregation, gap analysis, and conflict detection;
+- at most one bounded follow-up search round;
+- cited synthesis and citation-repair attempts;
+- response-ID persistence, status mapping, recovery, and cancellation;
+- source deduplication, stable report citation numbering, and safe links;
+- report snapshots and claim-level Insight Diff;
+- tenant isolation, budgets, tests, and user experience.
+
+OpenAI is the only Research provider enabled in the submission. The abstraction
+is retained so a future model can replace it without rewriting
+`ResearchService`; no alternative provider is exposed now.
+
+### Job lifecycle
+
+    queued → planning → collecting → verifying → comparing → synthesizing
+                                                                  ↓
+                                                              completed
+
+Any active stage may become `failed` or `cancelled`. A retryable transport or
+rate-limit failure uses bounded exponential backoff. Provider retry hints are
+clamped to 30 seconds, and automatic rate-limit waiting is capped at 90 seconds
+for the whole job. Quota exhaustion fails immediately and does not enter a
+misleading retry loop.
+
+Each Research Job stores its user and conversation, model, prompt version,
+budget, stage, Research Brief, subtasks, response IDs, provider states, retry
+state, sources, citations, report snapshots, Insight Diff, errors, and
+timestamps.
+
+### Recovery boundary
+
+Refreshing or reopening a conversation retrieves the persisted job and existing
+OpenAI Responses by saved ID; it does not create another job. Explicit Stop
+cancels every active Response belonging to that job.
+
+Without Cloud Tasks, Mind does not promise autonomous stage advancement while
+no client or API request is active. OpenAI background Responses can continue,
+and reopening the conversation reconciles their saved IDs and resumes the Mind
+Harness. This limitation must be stated in the final report.
+
+### Per-job guardrails
+
+- At most two search rounds.
+- Four to six initial subquestions by default.
+- Whole-job soft and hard web-search call limits.
+- Maximum two concurrent search workers by default.
+- Soft search deadline and hard whole-job timeout.
+- Bounded transport and rate-limit retries.
+- Maximum active Research jobs per user.
+- File type, size, page, and extracted-text limits.
+- Request ownership and idempotency checks.
+- Server-side secrets, redacted logs, and provider-neutral error messages.
+
+No daily user quota is required for submission.
+
+## Manual Insight Diff
+
+The second original feature is a user-triggered evidence comparison, not an
+update report that overwrites the previous result.
+
+    Open completed Research report
+            ↓
+    Compare with latest evidence
+            ↓
+    Freeze current report as immutable baseline
+            ↓
+    Run the same Research Brief against current evidence
+            ↓
+    Save a separate latest report snapshot
+            ↓
+    Compare claims and evidence
+            ↓
+    Show New / Changed / Contradicted / Stale or
+    No material changes detected
+
+Required behavior:
+
+- Baseline and latest reports remain independently viewable.
+- The latest report never mutates the baseline.
+- Changed and contradicted claims retain old and new evidence.
+- Report citations show only sources used by the article, deduplicated by
+  canonical URL and renumbered in order of first use.
+- A completed comparison is persisted in the Research conversation.
+- The user can continue the conversation after reviewing the report or Diff.
+- Local zero-cost demo data covers all change categories and the no-change state.
 
-## Current foundation to retain
+Scheduled tracking, Watch records, Heartbeats, and notifications are out of
+scope.
 
-The repository already contains a useful local vertical slice:
+## Memory boundary
 
-- React conversation and Research UI.
-- FastAPI streaming API.
-- Normal Chat ModelProvider boundary.
-- Tenant-scoped conversation and Research repositories.
-- Local atomic JSON persistence.
-- Research Job, cancel, resume, sources, and progress UI.
-- Request IDs, structured errors, and JSON logs.
-- Deterministic backend and frontend tests.
-
-The original DeepSeek/Tavily path has been removed. The only production provider
-is `OpenAIResearchProvider`; the Harness itself remains provider-independent and
-tests inject a mock that makes no billable calls.
-
-No broad directory rewrite is required. Existing provider, repository, API,
-conversation, SSE, and frontend boundaries should be evolved incrementally.
+The Memory Ledger stores typed, user-visible entries with provenance,
+confidence, sensitivity, enabled state, pinning, expiry, and superseded history.
+It supports structured extraction, exact and semantic deduplication,
+LLM-assisted update/conflict classification, OpenAI embeddings in staging, and
+Firestore vector retrieval with lexical fallback.
 
-## Research Harness requirements
+Users can inspect, confirm, edit, enable, disable, pin, expire, and delete
+memories. Disabled, unresolved, stale, or deleted memories do not enter model
+context.
 
-### 1. ResearchProvider contract
+Periodic full-ledger consolidation, importance decay, and automatic refreshing
+of Research-derived facts are explicitly omitted.
 
-ResearchService depends only on a small interface covering one bounded Harness
-task:
-
-- start a background Response from a typed task request;
-- retrieve the current provider state by response ID;
-- cancel an active Response;
-- parse output text, citations, sources, tool usage, status, and errors.
+## Submission work remaining
 
-The only production implementation is OpenAIResearchProvider.
+### 1. Scope cleanup
 
-Tests may use mocks or fakes that return representative OpenAI payloads. They
-must not be exposed as a production search option.
+Status: completed on 2026-08-23.
 
-### 2. Durable Research Job state machine
+- Remove Heartbeats and Voice placeholder controls from the frontend.
+- Remove claims of scheduled automation, production promotion, and daily quotas
+  from canonical documentation.
+- Keep local/demo files and unrelated user work out of commits.
 
-Use an explicit Harness state machine:
-
-    queued → planning → collecting → verifying → synthesizing → completed
-                         ↑              │
-                         └ second round ┘
-    any active phase → failed or cancelled
+### 2. Deterministic verification
 
-Planning creates a Research Brief with 4–8 questions. Collecting starts one
-background Web Search Response per question. Verification identifies conflicts
-and material evidence gaps. At most one follow-up search round runs before final
-synthesis. A restarted cancelled run archives all prior response IDs instead of
-pretending that the original Responses continued.
+Status: completed on 2026-08-23.
 
-Each Research Job stores at least:
+- Run frontend build and contract tests.
+- Run backend lint, type checks, and tests.
+- Run Terraform formatting and validation.
+- Verify Research failure mappings, cancellation, refresh recovery, citation
+  normalization, Insight Diff classification, tenant isolation, file ownership,
+  and Memory controls.
 
-- job ID;
-- user ID and conversation ID;
-- model and prompt version;
-- overall search-round, tool-call, and timeout budget;
-- Research Brief and verification result;
-- every subtask's kind, round, question, response ID, provider status, output,
-  sources, citations, tool usage, error, and timestamps;
-- compatibility pointer to the most recently active provider response ID;
-- status and provider status;
-- archived response IDs from restarted attempts;
-- global source ledger, final citation map, and final report;
-- timestamps;
-- normalized error code and safe message.
-
-### 3. Disconnect and cancellation semantics
-
-A browser close, refresh, navigation, network loss, crash, or device sleep means
-only that the client detached. It does not cancel background Research.
-
-An active Research task is cancelled only by an explicit authenticated action:
-
-- the user clicks Stop research;
-- the user confirms deletion of a conversation and chooses to stop its active
-  task;
-- account deletion cancels all owned active tasks;
-- an administrator or budget policy explicitly terminates the task.
-
-The cancellation flow is:
-
-    POST /api/research/{job_id}/cancel
-    → verify ownership and cancellable state
-    → enumerate every queued/running subtask response ID
-    → call OpenAI cancel for each active Response
-    → persist cancelled
-
-Logout alone does not cancel Research.
-
-The server persists each provider response ID immediately after `start` returns
-and before further polling or starting later phases. A disconnected browser
-retrieves every saved Response by ID; GET refresh never creates provider work.
+Recorded result:
 
-### 4. Background reconciliation
+- `ruff check backend`: passed.
+- CI-scoped Pyright check: 0 errors and 0 warnings.
+- Frontend build/contracts: 15 passed; the emulator-only test was then run
+  separately.
+- Backend suite: 122 passed.
+- Firebase Auth/Firestore Emulator tenant-isolation rules: 1 passed.
+- Terraform 1.14.3 formatting and validation: passed.
 
-OpenAI executes each task, but Mind owns the durable reconciler:
+### 3. Small concurrency check
 
-    POST /api/research
-    → create Firestore Research Job
-    → create and save the Brief Response ID
-    → parse Brief and fan out search Responses
-    → save every subtask Response ID
-    → enqueue Cloud Task
-    → retrieve until each phase is terminal
-    → verify evidence and optionally fan out round two
-    → synthesize and save report, citations, and sources
-
-Frontend polling may opportunistically refresh a job, but production completion
-must not depend on the browser remaining open.
+Run one bounded staging check that exercises a small number of simultaneous
+read-only/low-cost requests. Record:
 
-Cloud Task execution is idempotent. A retry retrieves every subtask with a saved
-response ID and starts only pending tasks that have never reached the provider.
+- tested concurrency and request mix;
+- success and error counts;
+- p50 and p95 latency;
+- any Cloud Run scaling or provider-limit observation;
+- the capacity assumptions below.
 
-### 5. Context and input assembly
+This is evidence for the submission, not a large load test.
 
-Mind builds the provider request from:
+### 4. Staging release and reviewer smoke test
 
-- the current question;
-- bounded relevant conversation context;
-- user-approved memories;
-- bounded extracted file content;
-- locale and time context;
-- the previous report when running a Research Watch;
-- prompt version and research policy;
-- reasoning effort and maximum tool calls.
+- Deploy the selected revision with `npm run deploy:staging`.
+- Verify API health and Firebase Hosting.
+- Create and authenticate a reviewer account.
+- Test Chat, TXT/PDF input, Research start/progress/stop, refresh recovery,
+  sources, Memory, manual Insight Diff, and account deletion.
+- Confirm secrets and private files are not exposed to the browser or repository.
 
-Every injected memory and file remains traceable to its source ID.
+### 5. Final documentation
 
-### 6. Citation and source ledger
+- Record the staging URL and reviewer journey.
+- Explain OpenAI versus Mind Harness ownership.
+- Describe architecture, security, tenant isolation, testing, resilience,
+  capacity assumptions, deliberate omissions, and known limitations.
+- Include representative screenshots and local Insight Diff demo instructions.
+- Confirm repository access and submission links.
 
-Mind parses and stores:
-
-- final output text;
-- inline URL citations and text offsets;
-- complete sources returned by web search calls;
-- stable source IDs;
-- source title, URL, and provider metadata;
-- model, prompt version, and completion timestamp.
-
-Deterministic validation covers malformed URLs, invalid citation offsets,
-duplicate URLs, missing source mappings, and unsafe link protocols.
-
-Inline citations and source links must be clearly visible and clickable.
-
-### 7. Guardrails and budgets
-
-Current status: Resilience Harness v1 is implemented for local and staging paths.
-It persists retry state, separates transport retries from bounded stage restarts,
-honors rate-limit retry hints with a provider-neutral UI, limits parallel searches,
-uses soft and hard deadlines, and can finish with an explicit partial-evidence
-warning when the minimum completed-search threshold is met.
-
-Enforce:
-
-- at most two search rounds;
-- 4–8 Brief subquestions, with six as the default cap;
-- a whole-job web-search tool-call budget;
-- a whole-job timeout that cancels still-running Responses;
-- maximum active Research jobs per user;
-- daily Research quota;
-- bounded provider polling with backoff;
-- file size, type, and extracted-text limits;
-- idempotency keys;
-- request and job ownership checks;
-- server-side secrets only;
-- safe error messages and redacted logs.
-
-When exact monetary interruption cannot be guaranteed inside a provider
-Response, use tool-call limits, per-user quotas, concurrency limits, and usage
-reporting as the enforceable first version.
-
-### 8. Idempotency and recovery
-
-Current status: Each retryable subtask keeps its response ID and persisted next
-retry time. Context or incomplete-output recovery restarts only the affected stage
-with a reduced evidence packet; a browser refresh resumes this state instead of
-creating a duplicate Response. Unit tests inject rate limits, transient retrieval
-failures, context limits, slow searches, and partial worker failure.
-
-The Harness must prevent:
-
-- duplicate OpenAI Responses from retried start requests;
-- duplicate assistant messages;
-- concurrent completion writers;
-- duplicate scheduled Watch runs;
-- a user reading or cancelling another user's job.
-
-Recovery tests cover browser reconnect, API restart, Cloud Task retry, provider
-timeout, provider failure, cancellation, and completion racing with cancellation.
-
-## Local-to-production development strategy
-
-### Stage A — Local Research vertical slice
-
-Use the current JSON repositories and a local identity boundary to complete the
-Research Harness before Firebase is required.
-
-Local success means:
-
-- start persists a response ID;
-- retrieve maps queued, running, completed, failed, and cancelled states;
-- refresh and process restart recover the original task;
-- explicit stop calls provider cancel;
-- citations and complete sources are normalized and clickable;
-- completion writes exactly one assistant message;
-- mocked tests require no real API key;
-- one minimal real smoke test is run when an OpenAI API key is available.
-
-### Stage B — Firebase Emulator Suite
-
-After the local Research vertical slice is stable, add:
-
-- Authentication Emulator;
-- Firestore Emulator;
-- Cloud Storage Emulator;
-- Security Rules tests;
-- import and export of deterministic test data.
-
-Use the same repository interfaces in local and production modes. The business
-services must not know whether persistence is JSON, an emulator, or production
-Firestore.
-
-All domain records include user ID from the beginning so tenant isolation is not
-retrofit later.
-
-### Stage C — Google Cloud staging and production
-
-Replace local implementations with:
-
-- Firestore repositories;
-- Cloud Storage files;
-- Cloud Tasks reconciliation;
-- Cloud Scheduler Heartbeats;
-- Cloud Run API and workers;
-- Secret Manager configuration.
-
-Deploy a thin staging vertical slice early instead of postponing all deployment
-work to the final week.
-
-## Vector retrieval policy
-
-A vector database is not required for Research Job, report, citation, source,
-conversation, or account persistence.
-
-Vector retrieval is introduced only for the Memory Ledger:
-
-    MemoryRetriever
-    ├── LocalMemoryRetriever
-    └── FirestoreVectorRetriever
-
-The local retriever may use deterministic fake embeddings, keyword scoring, or
-small in-process cosine similarity. Production uses OpenAI embeddings and
-Firestore vector search with bounded fallback while its index is unavailable.
-
-Memory retrieval must not block the initial OpenAI Research integration.
-
-## Focused domain model
-
-### ResearchJob
-
-- id
-- user_id
-- conversation_id
-- provider
-- model
-- provider_response_id
-- status
-- provider_status
-- attempt
-- retry_of
-- input_file_ids
-- memory_ids
-- prompt_version
-- error
-- report_id
-- created_at
-- updated_at
-
-### ResearchReport
-
-- id
-- job_id
-- user_id
-- output_text
-- citation_ids
-- source_ids
-- model
-- prompt_version
-- usage
-- completed_at
-
-### ResearchCitation
-
-- id
-- report_id
-- source_id
-- start_index
-- end_index
-- title
-- url
-
-### ResearchSource
-
-- id
-- report_id
-- title
-- url
-- source_type
-- provider_metadata
-
-### Memory
-
-- id
-- user_id
-- type
-- content
-- provenance
-- confidence
-- sensitivity
-- pinned
-- enabled
-- expires_at
-
-Recommended memory types:
-
-- goal
-- preference
-- project
-- fact
-- decision
-
-### ResearchWatch
-
-- id
-- user_id
-- baseline_report_id
-- schedule
-- focus
-- budget
-- enabled
-- last_run_at
-- next_run_at
-
-### WatchRun and InsightDiff
-
-WatchRun stores the watch, previous report, new report, status, idempotency key,
-and retry record.
-
-InsightDiff stores:
-
-- new claims;
-- changed claims;
-- contradicted claims;
-- stale claims;
-- unchanged claims;
-- recommended actions.
-
-Claims are extracted from completed reports as a post-processing step for
-comparison. They do not drive a custom replacement for OpenAI web research.
-
-## Implementation phases
-
-### Phase 0 — Freeze baseline and migrate Research to OpenAI
-
-Estimated effort: 1–2 days
-
-- Preserve the current passing test baseline.
-- Define ResearchProvider.
-- Implement the sole production OpenAIResearchProvider.
-- Use Responses background mode for every bounded stage and enable built-in web
-  search only for evidence workers.
-- Generate a Research Brief, fan out 4–8 subquestions, verify evidence, run at
-  most one follow-up round, and synthesize with stable source markers.
-- Persist every subtask response ID and map provider states.
-- Implement retrieve, cancel, parsing, and safe error mapping.
-- Parse output text, inline citations, and complete sources.
-- Remove Research-specific DeepSeek, Tavily, and Fake production configuration.
-- Keep normal Chat DeepSeek configuration unchanged.
-- Add mocked unit and API integration tests.
-
-Exit criteria:
-
-- Research runs, reconnects, completes, fails safely, and cancels every active
-  Response.
-- Browser disconnect does not recreate or cancel saved OpenAI Responses.
-- Budgets cap rounds, subquestions, total web-search calls, and wall time.
-- Deterministic quality metrics cover sources, authority, citation coverage,
-  conflict detection, and expected facts.
-- Every completion produces one persisted assistant message.
-- No real API key is needed for the required test suite.
-
-### Phase 1 — Authentication, Firestore foundation, and early staging
-
-Estimated effort: 4–5 days
-
-- Implement Firebase registration, login, logout, and account deletion.
-- Verify Firebase ID tokens in FastAPI.
-- Add active-user or allowlist authorization for restricted production access.
-- Implement Firestore repositories behind existing protocols.
-- Add tenant-isolation and Security Rules tests with emulators.
-- Create the Terraform skeleton.
-- Deploy React, FastAPI, Auth, and Firestore as an early staging slice.
-- Start CI with backend tests, frontend tests, lint, type checks, and Terraform
-  validation.
-
-Exit criteria:
-
-- Users cannot read, mutate, or cancel one another's resources.
-- Registration and restricted service access both work.
-- Account deletion has a defined, tested cleanup workflow.
-- A staging URL exists before later feature work.
-
-### Phase 2 — Non-text file input
-
-Estimated effort: 2–3 days
-
-Status: implemented on the file-input feature branch; staging deployment is
-pending review and merge.
-
-- Add bounded TXT and PDF upload.
-- Store originals in Cloud Storage.
-- Validate MIME type, extension, size, and ownership.
-- Extract bounded text server-side.
-- Attach files to Chat and Research requests.
-- Track provenance from injected text to file ID.
-- Treat files as untrusted evidence: isolate claim extraction from tool use, exclude
-  embedded instructions from downstream prompts, and verify material claims against
-  independent web sources.
-- Keep file provenance (`[F#]`) separate from web evidence (`[S#]`), with explicit
-  corroborated, unverified, and conflict states.
-- Delete owned files during account deletion.
-
-Exit criteria:
-
-- At least one real non-text file can affect a Chat or Research result.
-- A user cannot access another user's file.
-- Oversized, unsupported, or malformed files fail safely.
-
-Voice and Google Drive are deferred until this path is complete.
-
-### Phase 3 — Production Research Harness
-
-Estimated effort: 3–4 days
-
-Status: Core resilience, Firestore job persistence, refresh recovery, cancellation,
-bounded concurrency, deadlines, partial completion, and source/citation validation
-are implemented. Cloud Tasks reconciliation and production usage telemetry remain.
-
-- Move production Research Job persistence to Firestore.
-- Add Cloud Tasks reconciliation.
-- Add idempotent start, poll, finalize, cancel, and restart operations.
-- Add quotas, concurrency, polling backoff, timeout, and usage reporting.
-- Preserve SSE progress while making browser presence optional.
-- Add citation and source validation.
-- Add structured operational events and metrics.
-
-Exit criteria:
-
-- Research completes after the browser closes.
-- API or worker restart does not lose the job.
-- Cloud Task retry does not create another OpenAI Response.
-- Cancellation and completion races have deterministic outcomes.
-
-### Phase 4 — Memory Ledger
-
-Estimated effort: 3–4 days
-
-Status: Intelligent Memory MVP implemented. Local JSON and Firestore repositories
-share the same boundary. Production uses strict OpenAI structured extraction,
-OpenAI embeddings, and a 256-dimension Firestore vector index behind replaceable
-provider/retriever interfaces. Deterministic extraction and hashed embeddings
-remain local/test fallbacks only.
-
-Implement the first original feature:
-
-- typed memory candidates from conversations and reports;
-- reject questions, requests, quoted text, and credentials before persistence;
-- provenance, confidence, and sensitive-data filtering;
-- explicit user confirmation for important or sensitive memories;
-- exact and semantic deduplication, LLM-assisted update/conflict classification,
-  superseded history, and stale-memory revalidation without silent deletion;
-- inspect, pin, edit, disable, delete, and expire controls;
-- relevant-memory retrieval before Chat and Research;
-- local MemoryRetriever and production FirestoreVectorRetriever boundaries;
-- lazy embedding backfill for existing ledger entries.
-
-Exit criteria:
-
-- Relevant user goals and preferences can affect a later result.
-- Users can see and control everything Mind remembers.
-- Deleted or disabled memories are not retrieved.
-- Conflicting or stale information stays out of context until the user resolves
-  or reconfirms it.
-
-Deferred beyond this Friday MVP: automatic Research Watch scheduling, long-term
-importance decay, bulk migration tooling for very large ledgers, and a broad
-offline memory-quality benchmark suite.
-
-### Phase 5 — Research Watch, Heartbeat, and Insight Diff
-
-Estimated effort: 3–4 days
-
-Implement the second original feature:
-
-    Open completed report
-    → Track this topic
-    → Choose schedule, focus, and budget
-    → Cloud Scheduler triggers an idempotent Watch run
-    → OpenAI creates a new research snapshot
-    → Structured claim post-processing compares snapshots
-    → Insight Diff presents what changed
-
-Implement:
-
-- Watch create, list, pause, resume, and delete;
-- Cloud Scheduler and Cloud Tasks execution;
-- run history and retry records;
-- new, changed, contradicted, stale, and unchanged categories;
-- in-app notification;
-- duplicate concurrent-run prevention.
-
-Exit criteria:
-
-- A report can be researched again without the user being online.
-- The result emphasizes change instead of repeating the entire report.
-- Duplicate scheduled executions are prevented.
-
-### Phase 6 — Production hardening and deliverables
-
-Estimated effort: 3–4 days
-
-Complete:
-
-- automated staging deployment from the main branch;
-- controlled production promotion;
-- post-deployment smoke tests;
-- Python linting, type checks, and tests;
-- React build and frontend tests;
-- Terraform validation and plan;
-- container, dependency, and secret scanning;
-- Cloud Logging dashboards and Monitoring alerts;
-- load, recovery, and tenant-isolation tests;
-- production deployment;
-- Google Doc report;
-- GitHub submission permissions.
-
-CI, documentation, monitoring, and report evidence are accumulated from Phase 1.
-Phase 6 is final validation and packaging rather than the first time they are
-considered.
-
-Exit criteria:
-
-- The production URL passes the reviewer journey.
-- Infrastructure can be reproduced from Terraform.
-- The report includes architecture, quality, monitoring, security, omissions,
-  capacity assumptions, and creative decisions.
-
-## Four-week schedule
-
-| Week | Primary outcome |
-| --- | --- |
-| Week 1 | OpenAI Research local Harness, Firebase Auth and Firestore foundation, Terraform skeleton, first staging deployment |
-| Week 2 | Cloud Tasks recovery, file input, citation ledger, account deletion, tenant security |
-| Week 3 | Memory Ledger, Research Watch, Heartbeat, Insight Diff |
-| Week 4 | CI/CD completion, monitoring, security and load tests, production deployment, Google Doc report |
-
-## Scope control
-
-Prioritize in this order:
-
-1. Complete account lifecycle and restricted access.
-2. OpenAI Research with durable state, cancellation, reconnect, and sources.
-3. One real non-text input path.
-4. Google Cloud staging and Terraform.
-5. User-controlled Memory Ledger.
-6. Research Watch, Heartbeat, and Insight Diff.
-7. CI/CD, monitoring, security, production deployment, and report.
-
-Defer if time is limited:
-
-- custom crawling, indexing, or non-OpenAI search infrastructure;
-- Research-specific DeepSeek or Tavily providers;
-- multiple production Research providers;
-- voice after file upload works;
-- Google Drive integration;
-- email and mobile push notifications;
-- generic tool registry, MCP marketplace, or permissions framework;
-- multi-agent orchestration;
-- self-hosted models;
-- native mobile applications.
-
-## Production assumptions
-
-Use explicit and reviewable initial assumptions:
+## Capacity assumptions
 
 - 1,000 registered users.
 - 100 daily active users.
 - 20 concurrent Chat streams at peak.
-- 5 concurrent active Deep Research jobs.
-- 1 active Research job per user by default.
-- Per-user daily Research quota.
-- Per-job tool-call and duration controls.
-- 20 MB maximum uploaded file before extraction, subject to validation.
-- Horizontal Cloud Run scaling with bounded instance and worker concurrency.
-- Cloud Tasks retry with idempotent handlers.
+- 5 concurrent Research jobs across the service.
+- 1 active Research job per user.
+- 2 concurrent search workers inside one Research job.
+- 20 MB maximum raw uploaded file.
+- Cloud Run scale-to-zero with bounded instance concurrency.
 
-Validate these assumptions with load and recovery tests and revise them in the
-final report if measured results justify a change.
-
-## Continuous quality strategy
-
-Required deterministic tests:
-
-- ResearchProvider request and payload parsing;
-- OpenAI state mapping;
-- citation and source normalization;
-- Research Job state transitions;
-- Brief decomposition into 4–8 bounded subquestions;
-- parallel response-ID persistence and refresh recovery;
-- evidence-gap-driven second-round behavior and whole-job budgets;
-- browser disconnect recovery;
-- explicit cancellation of every active subtask;
-- cancelled and failed restart behavior;
-- idempotent start and finalize;
-- duplicate assistant-message prevention;
-- tenant isolation;
-- account lifecycle and deletion cleanup;
-- file ownership and validation;
-- memory enable, disable, delete, and retrieval;
-- duplicate Heartbeat prevention;
-- Insight Diff classification contracts.
-
-Staging tests:
-
-- minimal real OpenAI smoke test when a key is available;
-- Research quality comparison for source count, authoritative-source ratio,
-  citation coverage, conflict detection, and expected-fact correctness;
-- Auth and restricted-access journey;
-- upload-to-Research journey;
-- browser close and later recovery;
-- Cloud Task retry;
-- account deletion;
-- load test against documented capacity assumptions.
-
-Track:
-
-- Research success, cancellation, failure, and recovery rates;
-- latency and provider-status duration;
-- model usage and tool calls;
-- citation parsing and source-link validity;
-- duplicate-prevention events;
-- quota rejections;
-- Cloud Task depth, retries, and failures;
-- Heartbeat success and diff usefulness;
-- memory retrieval relevance.
-
-## Report workstream
-
-Maintain report evidence during implementation:
-
-- service overview and reviewer journey;
-- architecture and technology choices;
-- OpenAI versus Mind Harness ownership;
-- two original features and why they were selected;
-- deliberately omitted features and future policy;
-- testing and evaluation strategy;
-- monitoring and logging design;
-- authentication, tenant isolation, secrets, file security, and deletion;
-- capacity assumptions and measured load results;
-- failure recovery and cost controls;
-- architecture diagrams and staging or production screenshots.
-
-The final Google Doc must be shared as Anyone with the link can view.
+Per-job budgets protect Research cost and duration. These assumptions are not a
+promise of validated large-scale capacity; only the documented small
+concurrency check is required before submission.
 
 ## Definition of done
 
-The project is submission-ready when a reviewer can:
+Mind is submission-ready when a reviewer can:
 
 1. Create an account, sign in, sign out, and delete the account.
-2. Pass the production access policy.
-3. Chat with a configured LLM.
-4. Upload a TXT or PDF file and use it in Chat or Research.
-5. Start Deep Research and inspect progress, citations, and sources.
-6. Close the browser and later recover the same background Research.
-7. Explicitly stop an active Research task.
-8. See and control relevant long-term memories.
-9. Turn a report into a scheduled Research Watch.
-10. Receive an Insight Diff showing what changed.
-11. Access the deployed Google Cloud application.
-12. Review Terraform, CI/CD, tests, monitoring, security, capacity assumptions,
-    and the final report.
-13. Access the GitHub repository and view-only Google Doc deliverables.
+2. Chat with the configured model.
+3. Upload a TXT or PDF and use it in Chat or Research.
+4. Start Research and inspect its current stage, report, citations, and sources.
+5. Refresh or reopen the page and recover the same persisted Research Job.
+6. Explicitly stop an active Research task.
+7. Inspect and control everything Mind remembers.
+8. Compare a completed report with latest evidence.
+9. View immutable baseline/latest reports and structured, dual-evidence changes.
+10. See a clear no-change result when no material change is found.
+11. Use the current staging URL successfully.
+12. Review passing CI, Terraform, tests, capacity notes, security decisions,
+    deliberate omissions, and final documentation.

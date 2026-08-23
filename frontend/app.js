@@ -29,7 +29,6 @@ const researchStatusLabels = {
 
 const navigation = [
   { icon: "diamond", label: "Memory", view: "memory" },
-  { icon: "arrow-clockwise", label: "Heartbeats", view: "heartbeats" },
 ];
 
 function routeFromLocation() {
@@ -1185,7 +1184,6 @@ function Composer({
   onFiles,
   onRemoveFile,
   isUploading,
-  onVoice,
 }) {
   function onKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -1234,16 +1232,6 @@ function Composer({
               disabled: isStreaming || isUploading,
               onChange: onFiles,
             }),
-          ),
-          h(
-            "button",
-            {
-              className: "tool-button",
-              type: "button",
-              onClick: onVoice,
-              "aria-label": "Voice input",
-            },
-            h(Icon, { name: "microphone" }),
           ),
         ),
         h(
@@ -3178,7 +3166,6 @@ function App({ authSession }) {
     onFiles: stageFiles,
     onRemoveFile: removeAttachment,
     isUploading,
-    onVoice: () => setToast("Voice input is planned for a later phase."),
   };
 
   function selectSuggestion(prompt) {
@@ -3215,10 +3202,6 @@ function App({ authSession }) {
 
   function navigate(item) {
     setSidebarOpen(false);
-    if (item.view === "heartbeats") {
-      setToast("Heartbeats arrive in the next phase.");
-      return;
-    }
     if (item.view === "memory") {
       abortRef.current?.abort();
       setIsStreaming(false);
