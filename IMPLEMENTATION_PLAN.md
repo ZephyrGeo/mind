@@ -223,6 +223,8 @@ Recorded result:
 
 ### 3. Small concurrency check
 
+Status: completed on 2026-08-23.
+
 Run one bounded staging check that exercises a small number of simultaneous
 read-only/low-cost requests. Record:
 
@@ -233,6 +235,12 @@ read-only/low-cost requests. Record:
 - the capacity assumptions below.
 
 This is evidence for the submission, not a large load test.
+
+Recorded result: two runs sent 20 requests per target with five concurrent
+workers to the public Cloud Run health endpoint and Firebase Hosting. All 80
+requests returned HTTP 200. The first Cloud Run burst recorded a 6,289.0 ms p95
+from scale-to-zero; the immediate warm repeat recorded a 65.3 ms p95. See
+`docs/capacity-check.md` for the complete method, results, and limitations.
 
 ### 4. Staging release and reviewer smoke test
 

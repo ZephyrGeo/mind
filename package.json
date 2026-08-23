@@ -16,6 +16,7 @@
     "test:rules": "firebase emulators:exec --project demo-mind-local --only auth,firestore \"node --test tests/firestore-rules.test.mjs\"",
     "build": "node scripts/build.mjs",
     "preview": "node scripts/dev.mjs --no-watch",
+    "check:concurrency": "node scripts/check-concurrency.mjs",
     "seed:insight-diff-demo": "node scripts/seed-insight-diff-demo.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "test:backend": "node scripts/test-backend.mjs",

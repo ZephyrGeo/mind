@@ -164,6 +164,10 @@ For the Firebase Emulator tenant-isolation test, run:
 npm run test:rules
 ```
 
+The bounded, no-model staging concurrency check is documented in
+[Small staging concurrency check](docs/capacity-check.md). It can be reproduced
+with `npm run check:concurrency -- <api-health-url> <hosting-url>`.
+
 For an interactive emulator workspace, start `npm run emulators` in one terminal
 and `npm run dev:emulator` in another. Real Firebase Auth can be tested with the
 ignored `.env.firebase.local` file and `npm run dev:firebase`.
