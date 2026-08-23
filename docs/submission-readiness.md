@@ -68,24 +68,35 @@ Unauthenticated smoke checks after deployment:
 | Refresh on `#/memory` | Route remained `#/memory` |
 | Deployed UI bundle | Insight Diff present; deferred Heartbeats/Voice UI absent |
 
-## Authenticated reviewer smoke checklist
+## Authenticated reviewer smoke evidence
 
-The following checks require an existing verified Firebase user and intentional
-interaction with live model providers:
+Authenticated staging checks used a verified Firebase reviewer account on
+2026-08-23. No reviewer email address, token, or tenant identifier is recorded
+in the repository.
 
-- [ ] Sign in and sign out.
-- [ ] Open and refresh an existing Chat conversation.
-- [ ] Send one minimal Chat request.
-- [ ] Upload and remove one harmless TXT or PDF fixture.
-- [ ] Open Memory, refresh it, and confirm the route remains on Memory.
-- [ ] Start one minimal Research Job and observe stage updates.
-- [ ] Explicitly stop an active Research Job.
-- [ ] Open a completed cited report and its used-source list.
-- [ ] Run or inspect the local zero-cost Insight Diff demo.
-- [ ] Verify account deletion only with a disposable reviewer account.
+| Check | Result |
+| --- | --- |
+| Sign in | Passed; the tenant-scoped workspace and conversation list loaded |
+| Minimal Chat request | Passed; `Staging smoke test. Reply only: OK.` returned `OK.` |
+| Chat persistence | Passed; reload retained the smoke conversation URL and messages |
+| Memory navigation and refresh | Passed; reload retained `#/memory` and the Memory Ledger |
+| Persisted Research recovery | Passed; the saved Research conversation reopened as `Research stopped` at `1 / 6 steps` |
+| Research route refresh | Passed; reload retained the exact Research URL and stopped state with no browser console error |
+| Harmless TXT upload | Not completed through the in-app browser because its file chooser timed out before any file was selected; no file was transmitted |
+| New live Research run | Not repeated because the configured OpenAI project has insufficient balance; this avoids a misleading provider failure and additional cost |
+| Active-job Stop click | Not repeated without a funded live job; the previously stopped job and deterministic cancellation tests provide recovery evidence |
+| Completed used-source report | Covered by deterministic citation/source tests and the local demo; the available staging Research job is stopped before synthesis |
+| Insight Diff | Covered by the zero-cost local demo and deterministic frontend/backend tests |
+| Sign out | Not performed so the reviewer session remains available for follow-up checks |
+| Account deletion | Deliberately not performed on the persistent account; use a disposable reviewer account |
 
-Live Chat and Research checks may incur provider cost. Account deletion is not
-performed on a persistent user account merely for smoke testing.
+The authenticated browser session produced no console errors during Chat or
+Research refresh recovery. Live Chat and Research checks may incur provider
+cost. Account deletion is never performed on a persistent user account merely
+for smoke testing.
+
+The Chat smoke conversation remains in the reviewer's workspace. Its deletion
+requires an explicit confirmation because it removes cloud data.
 
 ## Known limitations and deliberate omissions
 
